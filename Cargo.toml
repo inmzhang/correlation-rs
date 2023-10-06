@@ -9,7 +9,14 @@ edition = "2021"
 anyhow = "1.0.71"
 bitvec = "1.0.1"
 nalgebra = "0.32.2"
+serde_yaml = "0.9.21"
 itertools = "0.10.5"
+smallvec = "1.10.0"
+rayon = "1.7.0"
+argmin = { version = "0.8.1" }
+argmin-math = { version = "0.3.0", features = ["ndarray_latest-serde"] }
+finitediff = { version = "0.1.4", features = ["ndarray"] }
+ndarray = { version = "0.15.6", features = ["serde-1"] }
 
 [profile.release]
 lto = true
