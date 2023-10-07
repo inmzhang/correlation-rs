@@ -7,8 +7,8 @@ use bitvec::prelude::*;
 use nalgebra::DMatrix;
 
 pub fn read_b8_file<P>(path: P, num_bits_per_shot: usize) -> Result<DMatrix<f64>>
-    where
-        P: AsRef<Path>,
+where
+    P: AsRef<Path>,
 {
     let data = std::fs::read(path)?;
     let num_bytes_per_shot = (num_bits_per_shot + 7) / 8;
@@ -23,8 +23,8 @@ pub fn read_b8_file<P>(path: P, num_bits_per_shot: usize) -> Result<DMatrix<f64>
 }
 
 pub fn read_01_file<P>(path: P) -> Result<DMatrix<f64>>
-    where
-        P: AsRef<Path>,
+where
+    P: AsRef<Path>,
 {
     let file = File::open(path)?;
     let buf_reader = BufReader::new(file);
@@ -32,13 +32,8 @@ pub fn read_01_file<P>(path: P) -> Result<DMatrix<f64>>
     let num_shots = lines.len();
     let num_bits_per_shot = lines[0].len();
     let bits_iter = lines.iter().flat_map(|line| {
-        line.chars().map(|c| {
-            if c == '1' {
-                1.0_f64
-            } else {
-                0.0_f64
-            }
-        })
+        line.chars()
+            .map(|c| if c == '1' { 1.0_f64 } else { 0.0_f64 })
     });
     let detection_events = DMatrix::from_row_iterator(num_shots, num_bits_per_shot, bits_iter);
     Ok(detection_events)

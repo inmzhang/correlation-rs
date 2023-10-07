@@ -43,8 +43,8 @@ def surface_code():
 
 def rep_code():
     code = "repetition_code:memory"
-    distance = 21
-    rounds = 10
+    distance = 5
+    rounds = 5
     shots = 1000
     circuit = stim.Circuit.generated(
         code,

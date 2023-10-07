@@ -118,8 +118,13 @@ pub fn cal_high_order_correlations(
     // thread pool to use
     let pool = create_thread_pool(num_threads);
     // solve each cluster in parallel
+
+    // let solved_probs = clusters
+    //     .iter()
+    //     .map(|cluster| solve_cluster(cluster, &extended_hyperedges, &expectations))
+    //     .collect::<Result<Vec<_>, Error>>()?;
     let solved_probs = pool.install(|| {
-         clusters
+        clusters
             .par_iter()
             .map(|cluster| solve_cluster(cluster, &extended_hyperedges, &expectations))
             .collect::<Result<Vec<_>, Error>>()
@@ -138,9 +143,11 @@ fn all_hyperedges_considered(
     let mut all_hyperedges: Vec<HyperEdge> = (0..num_detectors)
         .map(|e| HyperEdge::from_iter(std::iter::once(e)))
         .collect_vec();
-    all_hyperedges.extend((0..num_detectors)
-        .combinations(2)
-        .map(|e| e.into_iter().collect()));
+    all_hyperedges.extend(
+        (0..num_detectors)
+            .combinations(2)
+            .map(|e| e.into_iter().collect()),
+    );
     if let Some(hyperedges) = hyperedges {
         all_hyperedges.extend(hyperedges.into_iter().map(|e| {
             let mut hyperedge = HyperEdge::from_iter(e);
@@ -167,7 +174,10 @@ fn cluster_hyperedges(hyperedges: &Vec<HyperEdge>) -> (Vec<HyperEdge>, Vec<Clust
         let root = &hyperedges[i];
         let cluster = (1..=root.len())
             .flat_map(move |k| {
-                root.clone().into_iter().combinations(k).map(|c| c.into_iter().collect::<HyperEdge>())
+                root.clone()
+                    .into_iter()
+                    .combinations(k)
+                    .map(|c| c.into_iter().collect::<HyperEdge>())
             })
             .map(|h| {
                 if let Some(idx) = extended_hyperedges.iter().position(|e| *e == h) {
@@ -193,24 +203,29 @@ fn calculate_expectations(
     // pre-calculate 2-point expectations using
     // matrix multiply to reduce overhead
     let expect_ixj = cal_two_points_expects(detection_events);
-    let mut expectations = Vec::from_iter(
-        extended_hyperedges
-            .iter()
-            .take(n_low_order)
-            .map(|e| {
-                match e.len() {
+    let mut expectations =
+        Vec::from_iter(
+            extended_hyperedges
+                .iter()
+                .take(n_low_order)
+                .map(|e| match e.len() {
                     1 => expect_ixj[(e[0], e[0])],
                     2 => expect_ixj[(e[0], e[1])],
-                    _ => unreachable!("First (n+1)n/2 elements must be 1- and 2-point expectations"),
-                }
-            })
-    );
+                    _ => {
+                        unreachable!("First (n+1)n/2 elements must be 1- and 2-point expectations")
+                    }
+                }),
+        );
     // calculate the rest of the expectations
     for hyperedge in extended_hyperedges.iter().skip(n_low_order) {
-        expectations.push(hyperedge.iter().fold(
-            DVector::from_element(num_shots, 1.0_f64),
-            |acc, &det| acc.component_mul(&detection_events.column(det)),
-        ).mean());
+        expectations.push(
+            hyperedge
+                .iter()
+                .fold(DVector::from_element(num_shots, 1.0_f64), |acc, &det| {
+                    acc.component_mul(&detection_events.column(det))
+                })
+                .mean(),
+        );
     }
     expectations
 }
@@ -223,21 +238,23 @@ struct ClusterSolver {
 }
 
 impl ClusterSolver {
-    fn new(
-        cluster: &Cluster,
-        all_hyperedges: &[HyperEdge],
-        expectations: &[f64],
-    ) -> Self {
-        let hyperedges = cluster.iter().map(|&i| all_hyperedges[i].clone()).collect_vec();
+    fn new(cluster: &Cluster, all_hyperedges: &[HyperEdge], expectations: &[f64]) -> Self {
+        let hyperedges = cluster
+            .iter()
+            .map(|&i| all_hyperedges[i].clone())
+            .collect_vec();
         let expectations = cluster.iter().map(|&i| expectations[i]).collect_vec();
         let mut intersection = HashMap::with_capacity(hyperedges.len());
         let mut supersets = HashMap::with_capacity(hyperedges.len());
         for hyperedge in &hyperedges {
             let intersect = intersects(hyperedge, &hyperedges);
-            let superset = powerset(&intersect).into_iter().filter(|set| {
-                let sym_diff = symmetric_difference(set).collect_vec();
-                hyperedge.iter().all(|i| !sym_diff.contains(i))
-            }).collect_vec();
+            let superset = powerset(&intersect)
+                .into_iter()
+                .filter(|set| {
+                    let sym_diff = symmetric_difference(set).collect_vec();
+                    hyperedge.iter().all(|i| !sym_diff.contains(i))
+                })
+                .collect_vec();
             intersection.insert(hyperedge.clone(), intersect);
             supersets.insert(hyperedge.clone(), superset);
         }
@@ -271,10 +288,7 @@ impl ClusterSolver {
     }
 }
 
-fn cluster_cost(
-    param: &[f64],
-    cluster: &ClusterSolver,
-) -> f64 {
+fn cluster_cost(param: &[f64], cluster: &ClusterSolver) -> f64 {
     debug_assert_eq!(param.len(), cluster.hyperedges.len());
     let mut cost = 0.;
     for (hyperedge, &expect) in cluster.hyperedges.iter().zip(cluster.expectations.iter()) {
@@ -332,7 +346,7 @@ fn adjust_probabilities(
         .zip(solved_probs)
         .for_each(|(cluster, probs)| {
             let i = *cluster.last().unwrap();
-            adjusted_probs.insert(all_hyperedges[i].clone(), probs[i]);
+            adjusted_probs.insert(all_hyperedges[i].clone(), *probs.last().unwrap());
         });
     let mut weight_to_adjust = all_hyperedges[*clusters[0].last().unwrap()].len() - 1;
     while weight_to_adjust > 0 {
@@ -340,18 +354,31 @@ fn adjust_probabilities(
         // adjust the probability of hyperedges with weight
         // weight_to_adjust in each clusters by the probability
         // of the hyperedges with weight greater than that
-        for (cluster, probs) in clusters.iter().zip(solved_probs).filter(|&(cluster, _)| cluster.len() > weight_to_adjust) {
-            for &hyperedge_i in cluster.iter().filter(|&i| all_hyperedges[*i].len() == weight_to_adjust) {
-                let prob_this = probs[hyperedge_i];
+        for (cluster, probs) in clusters
+            .iter()
+            .zip(solved_probs)
+            .filter(|&(cluster, _)| cluster.len() > weight_to_adjust)
+        {
+            for (&hyperedge_i, &prob_this) in cluster
+                .iter()
+                .zip(probs)
+                .filter(|&(i, _)| all_hyperedges[*i].len() == weight_to_adjust)
+            {
                 let hyperedge = &all_hyperedges[hyperedge_i];
-                let adjusted_prob = adjusted_probs.iter().filter_map(|(h, &p)| {
-                    if hyperedge.iter().all(|i| h.contains(i)){
-                        Some(p)
-                    } else {
-                        None
-                    }
-                }).fold(prob_this, |p, q| (p - q) / (1.0 - 2.0 * q));
-                collected_probs.entry(hyperedge.clone()).or_insert(Vec::new()).push(adjusted_prob);
+                let adjusted_prob = adjusted_probs
+                    .iter()
+                    .filter_map(|(h, &p)| {
+                        if hyperedge.iter().all(|i| h.contains(i)) {
+                            Some(p)
+                        } else {
+                            None
+                        }
+                    })
+                    .fold(prob_this, |p, q| (p - q) / (1.0 - 2.0 * q));
+                collected_probs
+                    .entry(hyperedge.clone())
+                    .or_insert(Vec::new())
+                    .push(adjusted_prob);
             }
         }
         // average the probabilities of the same hyperedge in different clusters
@@ -367,27 +394,32 @@ fn adjust_probabilities(
 
 #[inline]
 fn powerset(hyperedges: &[HyperEdge]) -> Vec<Vec<HyperEdge>> {
-    (1..=hyperedges.len()).flat_map(move |k| {
-        hyperedges.iter().cloned().combinations(k)
-    }).collect_vec()
+    (1..=hyperedges.len())
+        .flat_map(move |k| hyperedges.iter().cloned().combinations(k))
+        .collect_vec()
 }
 
 #[inline]
 fn intersects(target: &HyperEdge, others: &[HyperEdge]) -> Vec<HyperEdge> {
-    others.iter().filter(|&h| h.iter().any(|&e| target.contains(&e))).cloned().collect_vec()
+    others
+        .iter()
+        .filter(|&h| h.iter().any(|&e| target.contains(&e)))
+        .cloned()
+        .collect_vec()
 }
 
 #[inline]
-fn symmetric_difference(hyperedges: &[HyperEdge]) -> impl Iterator<Item=usize> {
+fn symmetric_difference(hyperedges: &[HyperEdge]) -> impl Iterator<Item = usize> {
     let mut counts = HashMap::new();
     for hyperedge in hyperedges {
         for &e in hyperedge {
             *counts.entry(e).or_insert(0) += 1;
         }
     }
-    counts.into_iter().filter_map(|(e, c)| if c % 2 == 1 { Some(e) } else { None })
+    counts
+        .into_iter()
+        .filter_map(|(e, c)| if c % 2 == 1 { Some(e) } else { None })
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -399,7 +431,8 @@ mod tests {
             symmetric_difference(&[
                 HyperEdge::from_slice(&[0, 1, 2]),
                 HyperEdge::from_slice(&[1, 2, 3]),
-            ]).collect::<HashSet<usize>>(),
+            ])
+            .collect::<HashSet<usize>>(),
             HashSet::from([0, 3])
         );
 
@@ -408,7 +441,8 @@ mod tests {
                 HyperEdge::from_slice(&[0, 1, 2]),
                 HyperEdge::from_slice(&[1, 2, 3]),
                 HyperEdge::from_slice(&[2, 3, 4]),
-            ]).collect::<HashSet<usize>>(),
+            ])
+            .collect::<HashSet<usize>>(),
             HashSet::from([0, 2, 4])
         )
     }

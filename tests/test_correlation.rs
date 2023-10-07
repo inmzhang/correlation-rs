@@ -1,5 +1,5 @@
-use correlation::{cal_2nd_order_correlation, read_b8_file, cal_high_order_correlations};
-use std::time::Instant;
+use correlation::{cal_2nd_order_correlation, cal_high_order_correlations, read_b8_file};
+use smallvec::smallvec;
 
 #[test]
 fn test_2nd_correlation() {
@@ -8,10 +8,7 @@ fn test_2nd_correlation() {
     let num_detectors = metadata["num_detectors"].as_u64().unwrap() as usize;
 
     let dets = read_b8_file("test_data/surface_code/detectors.b8", num_detectors).unwrap();
-    let start = Instant::now();
     let (bdy, edges) = cal_2nd_order_correlation(&dets, None);
-    let duration = start.elapsed();
-    println!("Time elapsed in cal_2nd_order_correlation() is: {:?}", duration);
     assert_eq!(bdy.len(), num_detectors);
     assert_eq!(edges.shape(), (num_detectors, num_detectors));
     // println!("{:#?}", bdy);
@@ -24,8 +21,10 @@ fn test_high_order_correlation_rep_code() {
     let num_detectors = metadata["num_detectors"].as_u64().unwrap() as usize;
 
     let dets = read_b8_file("test_data/rep_code/detectors.b8", num_detectors).unwrap();
-    let start = Instant::now();
-    // let (bdy, edges) = cal_2nd_order_correlation(&dets, None);
-    let res = cal_high_order_correlations(&dets, None, 1);
-    let duration = start.elapsed();
+    let (bdy, edges) = cal_2nd_order_correlation(&dets, None);
+    let res = cal_high_order_correlations(&dets, None, 16).unwrap();
+    let bdy_high: Vec<_> = (0..num_detectors).map(|i| res[&smallvec![i]]).collect();
+    println!("{bdy}");
+    // println!("{:#?}", bdy_high);
+    println!("{:#?}", res);
 }
