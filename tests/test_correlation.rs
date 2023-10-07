@@ -22,9 +22,9 @@ fn test_high_order_correlation_rep_code() {
 
     let dets = read_b8_file("test_data/rep_code/detectors.b8", num_detectors).unwrap();
     let (bdy, edges) = cal_2nd_order_correlation(&dets, None);
-    let res = cal_high_order_correlations(&dets, None, 16).unwrap();
+    let res = cal_high_order_correlations(&dets, None, 16, 1e-4, 100).unwrap();
     let bdy_high: Vec<_> = (0..num_detectors).map(|i| res[&smallvec![i]]).collect();
     println!("{bdy}");
-    // println!("{:#?}", bdy_high);
+    println!("{:#?}", bdy_high);
     println!("{:#?}", res);
 }

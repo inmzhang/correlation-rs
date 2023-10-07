@@ -1,14 +1,14 @@
 use std::collections::{HashMap, HashSet};
 
-use argmin::core::{CostFunction, Error, Executor, Gradient};
-use argmin::solver::linesearch::MoreThuenteLineSearch;
-use argmin::solver::quasinewton::LBFGS;
-use finitediff::FiniteDiff;
 use itertools::Itertools;
-use nalgebra::{DMatrix, DVector};
-use ndarray::Array1;
 use rayon::prelude::*;
 use smallvec::SmallVec;
+use gomez::prelude::*;
+use gomez::nalgebra as na;
+use na::{DMatrix, DVector, Dynamic};
+use anyhow::Error;
+use gomez::nalgebra::{IsContiguous, Storage, StorageMut, Vector};
+use gomez::solver::TrustRegion;
 
 pub use io::{read_01_file, read_b8_file};
 
@@ -101,6 +101,10 @@ type Cluster = Vec<usize>;
 ///
 /// * `num_threads` - Number of threads to use in parallel.
 ///
+/// * `atol` - Absolute tolerance for the solver.
+///
+/// * `max_iter` - Maximum number of iterations for the solver.
+///
 /// # Returns
 ///
 /// A map from hyperedges to their correlation probabilities.
@@ -108,6 +112,8 @@ pub fn cal_high_order_correlations(
     detection_events: &DMatrix<f64>,
     hyperedges: Option<Vec<HashSet<usize>>>,
     num_threads: usize,
+    atol: f64,
+    max_iter: usize,
 ) -> Result<HashMap<HyperEdge, f64>, Error> {
     let num_detectors = detection_events.ncols();
     let all_hyperedges = all_hyperedges_considered(num_detectors, hyperedges);
@@ -116,19 +122,19 @@ pub fn cal_high_order_correlations(
     // calculate the expectations of each hyperedge
     let expectations = calculate_expectations(detection_events, &extended_hyperedges);
     // thread pool to use
-    let pool = create_thread_pool(num_threads);
+    // let pool = create_thread_pool(num_threads);
     // solve each cluster in parallel
 
-    // let solved_probs = clusters
-    //     .iter()
-    //     .map(|cluster| solve_cluster(cluster, &extended_hyperedges, &expectations))
-    //     .collect::<Result<Vec<_>, Error>>()?;
-    let solved_probs = pool.install(|| {
-        clusters
-            .par_iter()
-            .map(|cluster| solve_cluster(cluster, &extended_hyperedges, &expectations))
-            .collect::<Result<Vec<_>, Error>>()
-    })?;
+    let solved_probs = clusters
+        .iter()
+        .map(|cluster| solve_cluster(cluster, &extended_hyperedges, &expectations, atol, max_iter))
+        .collect::<Result<Vec<_>, Error>>()?;
+    // let solved_probs = pool.install(|| {
+    //     clusters
+    //         .par_iter()
+    //         .map(|cluster| solve_cluster(cluster, &extended_hyperedges, &expectations))
+    //         .collect::<Result<Vec<_>, Error>>()
+    // })?;
     // adjust probabilities
     let mut adjusted_probs = adjust_probabilities(&clusters, &extended_hyperedges, &solved_probs);
     // retain concerned hyperedges
@@ -288,33 +294,34 @@ impl ClusterSolver {
     }
 }
 
-fn cluster_cost(param: &[f64], cluster: &ClusterSolver) -> f64 {
-    debug_assert_eq!(param.len(), cluster.hyperedges.len());
-    let mut cost = 0.;
-    for (hyperedge, &expect) in cluster.hyperedges.iter().zip(cluster.expectations.iter()) {
-        cost -= expect;
-        let superset = &cluster.supersets[hyperedge];
-        superset.iter().for_each(|select| {
-            cost += cluster.prob_within_cluster(select, &cluster.intersection[hyperedge], param);
-        })
-    }
-    cost
-}
+impl Problem for ClusterSolver {
+    type Scalar = f64;
+    type Dim = Dynamic;
 
-impl CostFunction for ClusterSolver {
-    type Param = Array1<f64>;
-    type Output = f64;
-
-    fn cost(&self, param: &Self::Param) -> Result<Self::Output, Error> {
-        Ok(cluster_cost(param.as_slice().unwrap(), self))
+    fn dim(&self) -> Self::Dim {
+        Dynamic::new(self.hyperedges.len())
     }
 }
 
-impl Gradient for ClusterSolver {
-    type Param = Array1<f64>;
-    type Gradient = Array1<f64>;
-    fn gradient(&self, param: &Self::Param) -> Result<Self::Gradient, Error> {
-        Ok((*param).forward_diff(&|x| cluster_cost(x.as_slice().unwrap(), self)))
+impl System for ClusterSolver {
+    fn eval<Sx, Sfx>(
+        &self,
+        x: &Vector<Self::Scalar, Self::Dim, Sx>,
+        fx: &mut Vector<Self::Scalar, Self::Dim, Sfx>
+    ) -> Result<(), ProblemError>
+        where
+            Sx: Storage<Self::Scalar, Self::Dim> + IsContiguous,
+            Sfx: StorageMut<Self::Scalar, Self::Dim>
+    {
+        for (i, hyperedge) in self.hyperedges.iter().enumerate() {
+            let mut local_cost = -self.expectations[i];
+            let superset = &self.supersets[hyperedge];
+            superset.iter().for_each(|select| {
+                local_cost += self.prob_within_cluster(select, &self.intersection[hyperedge], x.as_slice())
+            });
+            fx[i] = local_cost;
+        }
+        Ok(())
     }
 }
 
@@ -322,16 +329,23 @@ fn solve_cluster(
     cluster: &Cluster,
     all_hyperedges: &[HyperEdge],
     expectations: &[f64],
+    atol: f64,
+    max_iter: usize,
 ) -> Result<Vec<f64>, Error> {
-    let cluster_solver = ClusterSolver::new(cluster, all_hyperedges, expectations);
+    let f = ClusterSolver::new(cluster, all_hyperedges, expectations);
+    let dom = f.domain();
     let n_params = cluster.len();
-    let init_param: Array1<f64> = Array1::from_iter(std::iter::repeat(0.0).take(n_params));
-    let line_search = MoreThuenteLineSearch::new().with_c(1e-4, 0.9)?;
-    let solver = LBFGS::new(line_search, 10);
-    let res = Executor::new(cluster_solver, solver)
-        .configure(|state| state.param(init_param).max_iters(100))
-        .run()?;
-    Ok(res.state.best_param.unwrap().into_iter().collect_vec())
+    let mut solver = TrustRegion::new(&f, &dom);
+    let mut x = DVector::from_element(n_params, 0.0);
+    let mut fx = DVector::from_element(n_params, 0.0);
+
+    for _ in 1..=max_iter {
+        solver
+            .next(&f, &dom, &mut x, &mut fx)
+            .expect("solver encountered an error");
+        if fx.norm() < atol { break; }
+    }
+    Ok(x.data.into())
 }
 
 fn adjust_probabilities(

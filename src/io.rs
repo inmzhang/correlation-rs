@@ -4,7 +4,7 @@ use std::path::Path;
 
 use anyhow::Result;
 use bitvec::prelude::*;
-use nalgebra::DMatrix;
+use gomez::nalgebra::DMatrix;
 
 pub fn read_b8_file<P>(path: P, num_bits_per_shot: usize) -> Result<DMatrix<f64>>
 where
