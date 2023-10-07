@@ -13,10 +13,11 @@ serde_yaml = "0.9.21"
 itertools = "0.10.5"
 smallvec = "1.10.0"
 rayon = "1.7.0"
-argmin = { version = "0.8.1" }
+argmin = { version = "0.8.1"}
 argmin-math = { version = "0.3.0", features = ["ndarray_latest-serde"] }
 finitediff = { version = "0.1.4", features = ["ndarray"] }
-ndarray = { version = "0.15.6", features = ["serde-1"] }
+ndarray = { version = "0.15", features = ["serde-1"] }
+ndarray-linalg = {version = "0.16", features = ["openblas-system"]}
 
 [profile.release]
 lto = true
