@@ -125,7 +125,10 @@ pub fn cal_high_order_correlations(
             .collect::<Result<Vec<_>, Error>>()
     })?;
     // adjust probabilities
-    todo!()
+    let mut adjusted_probs = adjust_probabilities(&clusters, &extended_hyperedges, &solved_probs);
+    // retain concerned hyperedges
+    adjusted_probs.retain(|h, _| all_hyperedges.contains(h));
+    Ok(adjusted_probs)
 }
 
 fn all_hyperedges_considered(
@@ -139,7 +142,11 @@ fn all_hyperedges_considered(
         .combinations(2)
         .map(|e| e.into_iter().collect()));
     if let Some(hyperedges) = hyperedges {
-        all_hyperedges.extend(hyperedges.into_iter().map(HyperEdge::from_iter));
+        all_hyperedges.extend(hyperedges.into_iter().map(|e| {
+            let mut hyperedge = HyperEdge::from_iter(e);
+            hyperedge.sort();
+            hyperedge
+        }));
     };
     all_hyperedges.sort_by_key(|h| h.len());
     all_hyperedges
@@ -318,7 +325,44 @@ fn adjust_probabilities(
     all_hyperedges: &[HyperEdge],
     solved_probs: &[Vec<f64>],
 ) -> HashMap<HyperEdge, f64> {
-    todo!()
+    let mut adjusted_probs = HashMap::with_capacity(all_hyperedges.len());
+    // largest hyperedges within each cluster do not need adjustment
+    clusters
+        .iter()
+        .zip(solved_probs)
+        .for_each(|(cluster, probs)| {
+            let i = *cluster.last().unwrap();
+            adjusted_probs.insert(all_hyperedges[i].clone(), probs[i]);
+        });
+    let mut weight_to_adjust = all_hyperedges[*clusters[0].last().unwrap()].len() - 1;
+    while weight_to_adjust > 0 {
+        let mut collected_probs = HashMap::new();
+        // adjust the probability of hyperedges with weight
+        // weight_to_adjust in each clusters by the probability
+        // of the hyperedges with weight greater than that
+        for (cluster, probs) in clusters.iter().zip(solved_probs).filter(|&(cluster, _)| cluster.len() > weight_to_adjust) {
+            for &hyperedge_i in cluster.iter().filter(|&i| all_hyperedges[*i].len() == weight_to_adjust) {
+                let prob_this = probs[hyperedge_i];
+                let hyperedge = &all_hyperedges[hyperedge_i];
+                let adjusted_prob = adjusted_probs.iter().filter_map(|(h, &p)| {
+                    if hyperedge.iter().all(|i| h.contains(i)){
+                        Some(p)
+                    } else {
+                        None
+                    }
+                }).fold(prob_this, |p, q| (p - q) / (1.0 - 2.0 * q));
+                collected_probs.entry(hyperedge.clone()).or_insert(Vec::new()).push(adjusted_prob);
+            }
+        }
+        // average the probabilities of the same hyperedge in different clusters
+        collected_probs.into_iter().for_each(|(h, probs)| {
+            let len = probs.len() as f64;
+            let prob = probs.into_iter().sum::<f64>() / len;
+            adjusted_probs.insert(h, prob);
+        });
+        weight_to_adjust -= 1;
+    }
+    adjusted_probs
 }
 
 #[inline]
