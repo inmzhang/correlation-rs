@@ -50,12 +50,12 @@ mod tests {
 
     #[test]
     fn test_read_file() {
-        let metadata = std::fs::File::open("test_data/metadata.yaml").unwrap();
+        let metadata = std::fs::File::open("test_data/surface_code/metadata.yaml").unwrap();
         let metadata: serde_yaml::Value = serde_yaml::from_reader(metadata).unwrap();
         let num_detectors = metadata["num_detectors"].as_u64().unwrap() as usize;
         let num_shots = metadata["num_shots"].as_u64().unwrap() as usize;
 
-        let path = "test_data/detectors.b8";
+        let path = "test_data/surface_code/detectors.b8";
         let data = read_b8_file(path, num_detectors).unwrap();
         assert_eq!(data.shape(), (num_shots, num_detectors));
         assert_eq!(data[(0, 0)], 0.);
@@ -65,12 +65,12 @@ mod tests {
 
     #[test]
     fn test_read_01_file() {
-        let metadata = std::fs::File::open("test_data/metadata.yaml").unwrap();
+        let metadata = std::fs::File::open("test_data/surface_code/metadata.yaml").unwrap();
         let metadata: serde_yaml::Value = serde_yaml::from_reader(metadata).unwrap();
         let num_detectors = metadata["num_detectors"].as_u64().unwrap() as usize;
         let num_shots = metadata["num_shots"].as_u64().unwrap() as usize;
 
-        let path = "test_data/detectors.01";
+        let path = "test_data/surface_code/detectors.01";
         let data = read_01_file(path).unwrap();
         assert_eq!(data.shape(), (num_shots, num_detectors));
         assert_eq!(data[(0, 0)], 0.);
