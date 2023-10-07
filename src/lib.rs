@@ -1,9 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
 use argmin::core::{CostFunction, Error, Executor, Gradient};
+use argmin::solver::conjugategradient::NonlinearConjugateGradient;
+use argmin::solver::conjugategradient::beta::PolakRibiere;
 use argmin::solver::linesearch::MoreThuenteLineSearch;
-use argmin::solver::quasinewton::LBFGS;
-use finitediff::FiniteDiff;
 use itertools::Itertools;
 use nalgebra::{DMatrix, DVector};
 use ndarray::Array1;
@@ -252,7 +252,7 @@ impl ClusterSolver {
                 .into_iter()
                 .filter(|set| {
                     let sym_diff = symmetric_difference(set).collect_vec();
-                    hyperedge.iter().all(|i| !sym_diff.contains(i))
+                    hyperedge.iter().all(|i| sym_diff.contains(i))
                 })
                 .collect_vec();
             intersection.insert(hyperedge.clone(), intersect);
@@ -271,6 +271,7 @@ impl ClusterSolver {
         selected: &[HyperEdge],
         intersection: &[HyperEdge],
         probs: &[f64],
+        filtering: Option<usize>,
     ) -> f64 {
         let mut prob = 1.0;
         self.hyperedges
@@ -278,6 +279,11 @@ impl ClusterSolver {
             .enumerate()
             .filter(|&(_, h)| intersection.contains(h))
             .for_each(|(i, h)| {
+                if let Some(filter) = filtering {
+                    if i == filter {
+                        return;
+                    }
+                }
                 if selected.contains(h) {
                     prob *= probs[i];
                 } else {
@@ -288,17 +294,58 @@ impl ClusterSolver {
     }
 }
 
-fn cluster_cost(param: &[f64], cluster: &ClusterSolver) -> f64 {
+#[inline]
+fn equation_lhs(
+    hyperedge: &HyperEdge,
+    param: &[f64],
+    cluster: &ClusterSolver,
+) -> f64 {
+    cluster.supersets[hyperedge]
+        .iter()
+        .map(|select| cluster.prob_within_cluster(select, &cluster.intersection[hyperedge], param, None))
+        .sum::<f64>()
+}
+
+fn residual(param: &[f64], cluster: &ClusterSolver) -> f64 {
     debug_assert_eq!(param.len(), cluster.hyperedges.len());
-    let mut cost = 0.;
-    for (hyperedge, &expect) in cluster.hyperedges.iter().zip(cluster.expectations.iter()) {
-        cost -= expect;
-        let superset = &cluster.supersets[hyperedge];
-        superset.iter().for_each(|select| {
-            cost += cluster.prob_within_cluster(select, &cluster.intersection[hyperedge], param);
-        })
-    }
-    cost
+    cluster
+        .hyperedges
+        .iter()
+        .zip(cluster.expectations.iter())
+        .map(|(hyperedge, &expect)| (equation_lhs(hyperedge, param, cluster) - expect).powf(2.0))
+        .sum()
+}
+
+fn analytical_gradient(param: &[f64], cluster: &ClusterSolver) -> Array1<f64> {
+    let gradients = cluster
+        .hyperedges
+        .iter()
+        .enumerate()
+        .map(|(i, hyperedge)| {
+            cluster
+                .hyperedges
+                .iter()
+                .zip(&cluster.expectations)
+                .filter_map(|(h, &expect)| {
+                    let intersection = &cluster.intersection[h];
+                    if intersection.contains(hyperedge) {
+                        Some(&cluster
+                            .supersets[h]
+                            .iter()
+                            .map(|select| {
+                                if select.contains(hyperedge) {
+                                    cluster.prob_within_cluster(select, intersection, param, Some(i))
+                                } else {
+                                    -cluster.prob_within_cluster(select, intersection, param, Some(i))
+                                }
+                            }).sum::<f64>() * 2.0 * (equation_lhs(h, param, cluster) - expect))
+                    } else {
+                        None
+                    }
+                })
+                .sum::<f64>()
+        });
+    Array1::from_iter(gradients)
 }
 
 impl CostFunction for ClusterSolver {
@@ -306,7 +353,7 @@ impl CostFunction for ClusterSolver {
     type Output = f64;
 
     fn cost(&self, param: &Self::Param) -> Result<Self::Output, Error> {
-        Ok(cluster_cost(param.as_slice().unwrap(), self))
+        Ok(residual(param.as_slice().unwrap(), self))
     }
 }
 
@@ -314,7 +361,8 @@ impl Gradient for ClusterSolver {
     type Param = Array1<f64>;
     type Gradient = Array1<f64>;
     fn gradient(&self, param: &Self::Param) -> Result<Self::Gradient, Error> {
-        Ok((*param).forward_diff(&|x| cluster_cost(x.as_slice().unwrap(), self)))
+        // Ok((*param).forward_diff(&|x| cluster_cost(x.as_slice().unwrap(), self)))
+        Ok(analytical_gradient(param.as_slice().unwrap(), self))
     }
 }
 
@@ -323,13 +371,16 @@ fn solve_cluster(
     all_hyperedges: &[HyperEdge],
     expectations: &[f64],
 ) -> Result<Vec<f64>, Error> {
-    let cluster_solver = ClusterSolver::new(cluster, all_hyperedges, expectations);
+    let problem = ClusterSolver::new(cluster, all_hyperedges, expectations);
     let n_params = cluster.len();
-    let init_param: Array1<f64> = Array1::from_iter(std::iter::repeat(0.0).take(n_params));
-    let line_search = MoreThuenteLineSearch::new().with_c(1e-4, 0.9)?;
-    let solver = LBFGS::new(line_search, 10);
-    let res = Executor::new(cluster_solver, solver)
-        .configure(|state| state.param(init_param).max_iters(100))
+    let init_param = Array1::from_elem(n_params, 0.0);
+    let linesearch = MoreThuenteLineSearch::new();
+    let beta_method = PolakRibiere::new();
+    let solver = NonlinearConjugateGradient::new(linesearch, beta_method)
+        .restart_iters(10)
+        .restart_orthogonality(0.1);
+    let res = Executor::new(problem, solver)
+        .configure(|state| state.param(init_param).max_iters(20).target_cost(0.0))
         .run()?;
     Ok(res.state.best_param.unwrap().into_iter().collect_vec())
 }
@@ -446,4 +497,28 @@ mod tests {
             HashSet::from([0, 2, 4])
         )
     }
+
+    // #[test]
+    // fn test_gradient() {
+    //     let metadata = std::fs::File::open("test_data/rep_code/metadata.yaml").unwrap();
+    //     let metadata: serde_yaml::Value = serde_yaml::from_reader(metadata).unwrap();
+    //     let num_detectors = metadata["num_detectors"].as_u64().unwrap() as usize;
+
+    //     let detection_events = read_b8_file("test_data/rep_code/detectors.b8", num_detectors).unwrap();
+    //     let num_detectors = detection_events.ncols();
+    //     let all_hyperedges = all_hyperedges_considered(num_detectors, None);
+    //     // divide the hyperedges into clusters
+    //     let (extended_hyperedges, clusters) = cluster_hyperedges(&all_hyperedges);
+    //     // calculate the expectations of each hyperedge
+    //     let expectations = calculate_expectations(&detection_events, &extended_hyperedges);
+    //     let cluster_solver = ClusterSolver::new(clusters.first().unwrap(), &extended_hyperedges, &expectations);
+    //     // dbg!(&cluster_solver.expectations);
+    //     let _residual = residual(&[0.1, 0.1, 0.0], &cluster_solver);
+    //     dbg!(analytical_gradient(&[0.1, 0.1, 0.0], &cluster_solver));
+    //     // let solved_probs = clusters
+    //     //     .iter()
+    //     //     .map(|cluster| solve_cluster(cluster, &extended_hyperedges, &expectations))
+    //     //     .collect::<Result<Vec<_>, Error>>()
+    //     //     .unwrap();
+    // }
 }
