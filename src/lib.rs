@@ -1,14 +1,14 @@
 use std::collections::{HashMap, HashSet};
 
+use anyhow::Error;
+use gomez::nalgebra as na;
+use gomez::nalgebra::{IsContiguous, Storage, StorageMut, Vector};
+use gomez::prelude::*;
+use gomez::solver::TrustRegion;
 use itertools::Itertools;
+use na::{DMatrix, DVector, Dynamic};
 use rayon::prelude::*;
 use smallvec::SmallVec;
-use gomez::prelude::*;
-use gomez::nalgebra as na;
-use na::{DMatrix, DVector, Dynamic};
-use anyhow::Error;
-use gomez::nalgebra::{IsContiguous, Storage, StorageMut, Vector};
-use gomez::solver::TrustRegion;
 
 pub use io::{read_01_file, read_b8_file};
 
@@ -87,7 +87,7 @@ fn analytical_core(detection_events: &DMatrix<f64>) -> (DVector<f64>, DMatrix<f6
     (correlation_bdy, correlation_edges)
 }
 
-type HyperEdge = SmallVec<[usize; 6]>;
+pub type HyperEdge = SmallVec<[usize; 6]>;
 
 type Cluster = Vec<usize>;
 
@@ -99,21 +99,19 @@ type Cluster = Vec<usize>;
 ///
 /// * `hyperedges` - A list of hyperedges. Each hyperedge is a set of detectors.
 ///
-/// * `num_threads` - Number of threads to use in parallel.
+/// * `num_threads` - Number of threads to use in parallel, default to number of cpus.
 ///
-/// * `atol` - Absolute tolerance for the solver.
-///
-/// * `max_iter` - Maximum number of iterations for the solver.
+/// * `max_iters` - Number of iterations the optimizer can take.
 ///
 /// # Returns
 ///
 /// A map from hyperedges to their correlation probabilities.
 pub fn cal_high_order_correlations(
     detection_events: &DMatrix<f64>,
-    hyperedges: Option<Vec<HashSet<usize>>>,
-    num_threads: usize,
+    hyperedges: Option<&[HashSet<usize>]>,
+    num_threads: Option<usize>,
     atol: f64,
-    max_iter: usize,
+    max_iters: usize,
 ) -> Result<HashMap<HyperEdge, f64>, Error> {
     let num_detectors = detection_events.ncols();
     let all_hyperedges = all_hyperedges_considered(num_detectors, hyperedges);
@@ -122,19 +120,26 @@ pub fn cal_high_order_correlations(
     // calculate the expectations of each hyperedge
     let expectations = calculate_expectations(detection_events, &extended_hyperedges);
     // thread pool to use
-    // let pool = create_thread_pool(num_threads);
+    let pool = create_thread_pool(num_threads.unwrap_or(num_cpus::get()));
     // solve each cluster in parallel
-
-    let solved_probs = clusters
-        .iter()
-        .map(|cluster| solve_cluster(cluster, &extended_hyperedges, &expectations, atol, max_iter))
-        .collect::<Result<Vec<_>, Error>>()?;
-    // let solved_probs = pool.install(|| {
-    //     clusters
-    //         .par_iter()
-    //         .map(|cluster| solve_cluster(cluster, &extended_hyperedges, &expectations))
-    //         .collect::<Result<Vec<_>, Error>>()
-    // })?;
+    // let solved_probs = clusters
+    //     .iter()
+    //     .map(|cluster| solve_cluster(cluster, &extended_hyperedges, &expectations, max_iters))
+    //     .collect::<Result<Vec<_>, Error>>()?;
+    let solved_probs = pool.install(|| {
+        clusters
+            .par_iter()
+            .map(|cluster| {
+                solve_cluster(
+                    cluster,
+                    &extended_hyperedges,
+                    &expectations,
+                    atol,
+                    max_iters,
+                )
+            })
+            .collect::<Result<Vec<_>, Error>>()
+    })?;
     // adjust probabilities
     let mut adjusted_probs = adjust_probabilities(&clusters, &extended_hyperedges, &solved_probs);
     // retain concerned hyperedges
@@ -144,7 +149,7 @@ pub fn cal_high_order_correlations(
 
 fn all_hyperedges_considered(
     num_detectors: usize,
-    hyperedges: Option<Vec<HashSet<usize>>>,
+    hyperedges: Option<&[HashSet<usize>]>,
 ) -> Vec<HyperEdge> {
     let mut all_hyperedges: Vec<HyperEdge> = (0..num_detectors)
         .map(|e| HyperEdge::from_iter(std::iter::once(e)))
@@ -155,8 +160,8 @@ fn all_hyperedges_considered(
             .map(|e| e.into_iter().collect()),
     );
     if let Some(hyperedges) = hyperedges {
-        all_hyperedges.extend(hyperedges.into_iter().map(|e| {
-            let mut hyperedge = HyperEdge::from_iter(e);
+        all_hyperedges.extend(hyperedges.iter().map(|e| {
+            let mut hyperedge = HyperEdge::from_iter(e.clone());
             hyperedge.sort();
             hyperedge
         }));
@@ -250,6 +255,7 @@ impl ClusterSolver {
             .map(|&i| all_hyperedges[i].clone())
             .collect_vec();
         let expectations = cluster.iter().map(|&i| expectations[i]).collect_vec();
+
         let mut intersection = HashMap::with_capacity(hyperedges.len());
         let mut supersets = HashMap::with_capacity(hyperedges.len());
         for hyperedge in &hyperedges {
@@ -258,7 +264,7 @@ impl ClusterSolver {
                 .into_iter()
                 .filter(|set| {
                     let sym_diff = symmetric_difference(set).collect_vec();
-                    hyperedge.iter().all(|i| !sym_diff.contains(i))
+                    hyperedge.iter().all(|i| sym_diff.contains(i))
                 })
                 .collect_vec();
             intersection.insert(hyperedge.clone(), intersect);
@@ -277,6 +283,7 @@ impl ClusterSolver {
         selected: &[HyperEdge],
         intersection: &[HyperEdge],
         probs: &[f64],
+        filtering: Option<usize>,
     ) -> f64 {
         let mut prob = 1.0;
         self.hyperedges
@@ -284,6 +291,11 @@ impl ClusterSolver {
             .enumerate()
             .filter(|&(_, h)| intersection.contains(h))
             .for_each(|(i, h)| {
+                if let Some(filter) = filtering {
+                    if i == filter {
+                        return;
+                    }
+                }
                 if selected.contains(h) {
                     prob *= probs[i];
                 } else {
@@ -307,17 +319,22 @@ impl System for ClusterSolver {
     fn eval<Sx, Sfx>(
         &self,
         x: &Vector<Self::Scalar, Self::Dim, Sx>,
-        fx: &mut Vector<Self::Scalar, Self::Dim, Sfx>
+        fx: &mut Vector<Self::Scalar, Self::Dim, Sfx>,
     ) -> Result<(), ProblemError>
-        where
-            Sx: Storage<Self::Scalar, Self::Dim> + IsContiguous,
-            Sfx: StorageMut<Self::Scalar, Self::Dim>
+    where
+        Sx: Storage<Self::Scalar, Self::Dim> + IsContiguous,
+        Sfx: StorageMut<Self::Scalar, Self::Dim>,
     {
         for (i, hyperedge) in self.hyperedges.iter().enumerate() {
             let mut local_cost = -self.expectations[i];
             let superset = &self.supersets[hyperedge];
             superset.iter().for_each(|select| {
-                local_cost += self.prob_within_cluster(select, &self.intersection[hyperedge], x.as_slice())
+                local_cost += self.prob_within_cluster(
+                    select,
+                    &self.intersection[hyperedge],
+                    x.as_slice(),
+                    None,
+                )
             });
             fx[i] = local_cost;
         }
@@ -343,7 +360,9 @@ fn solve_cluster(
         solver
             .next(&f, &dom, &mut x, &mut fx)
             .expect("solver encountered an error");
-        if fx.norm() < atol { break; }
+        if fx.norm() < atol {
+            break;
+        }
     }
     Ok(x.data.into())
 }
@@ -354,14 +373,14 @@ fn adjust_probabilities(
     solved_probs: &[Vec<f64>],
 ) -> HashMap<HyperEdge, f64> {
     let mut adjusted_probs = HashMap::with_capacity(all_hyperedges.len());
-    // largest hyperedges within each cluster do not need adjustment
-    clusters
-        .iter()
-        .zip(solved_probs)
-        .for_each(|(cluster, probs)| {
-            let i = *cluster.last().unwrap();
-            adjusted_probs.insert(all_hyperedges[i].clone(), *probs.last().unwrap());
-        });
+    // cache for lengths
+    let hyperedge_lengths: Vec<usize> = all_hyperedges.iter().map(|h| h.len()).collect();
+    // Insert largest hyperedges directly without adjustment
+    for (cluster, probs) in clusters.iter().zip(solved_probs) {
+        let i = *cluster.last().unwrap();
+        adjusted_probs.insert(all_hyperedges[i].clone(), *probs.last().unwrap());
+    }
+
     let mut weight_to_adjust = all_hyperedges[*clusters[0].last().unwrap()].len() - 1;
     while weight_to_adjust > 0 {
         let mut collected_probs = HashMap::new();
@@ -371,36 +390,36 @@ fn adjust_probabilities(
         for (cluster, probs) in clusters
             .iter()
             .zip(solved_probs)
-            .filter(|&(cluster, _)| cluster.len() > weight_to_adjust)
+            .filter(|&(cluster, _)| hyperedge_lengths[*cluster.last().unwrap()] > weight_to_adjust)
         {
             for (&hyperedge_i, &prob_this) in cluster
                 .iter()
                 .zip(probs)
-                .filter(|&(i, _)| all_hyperedges[*i].len() == weight_to_adjust)
+                .filter(|&(i, _)| hyperedge_lengths[*i] == weight_to_adjust)
             {
                 let hyperedge = &all_hyperedges[hyperedge_i];
                 let adjusted_prob = adjusted_probs
                     .iter()
                     .filter_map(|(h, &p)| {
-                        if hyperedge.iter().all(|i| h.contains(i)) {
-                            Some(p)
-                        } else {
-                            None
+                        if cluster.iter().any(|&i| &all_hyperedges[i] == h)
+                            || hyperedge.iter().any(|i| !h.contains(i))
+                        {
+                            return None;
                         }
+                        Some(p)
                     })
                     .fold(prob_this, |p, q| (p - q) / (1.0 - 2.0 * q));
                 collected_probs
-                    .entry(hyperedge.clone())
-                    .or_insert(Vec::new())
+                    .entry(hyperedge)
+                    .or_insert_with(Vec::new)
                     .push(adjusted_prob);
             }
         }
         // average the probabilities of the same hyperedge in different clusters
-        collected_probs.into_iter().for_each(|(h, probs)| {
-            let len = probs.len() as f64;
-            let prob = probs.into_iter().sum::<f64>() / len;
-            adjusted_probs.insert(h, prob);
-        });
+        for (h, probs) in collected_probs {
+            let prob = probs.iter().sum::<f64>() / probs.len() as f64;
+            adjusted_probs.insert(h.clone(), prob);
+        }
         weight_to_adjust -= 1;
     }
     adjusted_probs
