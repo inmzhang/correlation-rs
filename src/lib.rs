@@ -87,7 +87,7 @@ fn analytical_core(detection_events: &DMatrix<f64>) -> (DVector<f64>, DMatrix<f6
     (correlation_bdy, correlation_edges)
 }
 
-type HyperEdge = SmallVec<[usize; 6]>;
+pub type HyperEdge = SmallVec<[usize; 6]>;
 
 type Cluster = Vec<usize>;
 
@@ -101,6 +101,8 @@ type Cluster = Vec<usize>;
 ///
 /// * `num_threads` - Number of threads to use in parallel.
 ///
+/// * `max_iters` - Number of iterations the optimizer can take.
+///
 /// # Returns
 ///
 /// A map from hyperedges to their correlation probabilities.
@@ -108,6 +110,7 @@ pub fn cal_high_order_correlations(
     detection_events: &DMatrix<f64>,
     hyperedges: Option<Vec<HashSet<usize>>>,
     num_threads: usize,
+    max_iters: Option<u64>,
 ) -> Result<HashMap<HyperEdge, f64>, Error> {
     let num_detectors = detection_events.ncols();
     let all_hyperedges = all_hyperedges_considered(num_detectors, hyperedges);
@@ -118,15 +121,10 @@ pub fn cal_high_order_correlations(
     // thread pool to use
     let pool = create_thread_pool(num_threads);
     // solve each cluster in parallel
-
-    // let solved_probs = clusters
-    //     .iter()
-    //     .map(|cluster| solve_cluster(cluster, &extended_hyperedges, &expectations))
-    //     .collect::<Result<Vec<_>, Error>>()?;
     let solved_probs = pool.install(|| {
         clusters
             .par_iter()
-            .map(|cluster| solve_cluster(cluster, &extended_hyperedges, &expectations))
+            .map(|cluster| solve_cluster(cluster, &extended_hyperedges, &expectations, max_iters))
             .collect::<Result<Vec<_>, Error>>()
     })?;
     // adjust probabilities
@@ -370,17 +368,24 @@ fn solve_cluster(
     cluster: &Cluster,
     all_hyperedges: &[HyperEdge],
     expectations: &[f64],
+    max_iters: Option<u64>,
 ) -> Result<Vec<f64>, Error> {
     let problem = ClusterSolver::new(cluster, all_hyperedges, expectations);
     let n_params = cluster.len();
-    let init_param = Array1::from_elem(n_params, 0.0);
+    let init_param = Array1::from_elem(n_params, 0.001);
     let linesearch = MoreThuenteLineSearch::new();
     let beta_method = PolakRibiere::new();
     let solver = NonlinearConjugateGradient::new(linesearch, beta_method)
-        .restart_iters(10)
+        .restart_iters(100)
         .restart_orthogonality(0.1);
+    // FINE TUNE OF THE SOLVER PARAMS IS NEEDED
     let res = Executor::new(problem, solver)
-        .configure(|state| state.param(init_param).max_iters(20).target_cost(0.0))
+        .configure(|state| {
+            state
+                .param(init_param)
+                .max_iters(max_iters.unwrap_or(10 * n_params as u64))
+                .target_cost(0.0)
+        })
         .run()?;
     Ok(res.state.best_param.unwrap().into_iter().collect_vec())
 }
@@ -408,7 +413,7 @@ fn adjust_probabilities(
         for (cluster, probs) in clusters
             .iter()
             .zip(solved_probs)
-            .filter(|&(cluster, _)| cluster.len() > weight_to_adjust)
+            .filter(|&(cluster, _)| all_hyperedges[*cluster.last().unwrap()].len() > weight_to_adjust)
         {
             for (&hyperedge_i, &prob_this) in cluster
                 .iter()
@@ -419,13 +424,18 @@ fn adjust_probabilities(
                 let adjusted_prob = adjusted_probs
                     .iter()
                     .filter_map(|(h, &p)| {
-                        if hyperedge.iter().all(|i| h.contains(i)) {
+                        let index = all_hyperedges.iter().position(|x| x == h).unwrap();
+                        if !cluster.contains(&index) && hyperedge.iter().all(|i| h.contains(i)) {
                             Some(p)
                         } else {
                             None
                         }
                     })
                     .fold(prob_this, |p, q| (p - q) / (1.0 - 2.0 * q));
+                collected_probs
+                    .entry(hyperedge.clone())
+                    .or_insert(Vec::new())
+                    .push(adjusted_prob);
                 collected_probs
                     .entry(hyperedge.clone())
                     .or_insert(Vec::new())
@@ -497,28 +507,4 @@ mod tests {
             HashSet::from([0, 2, 4])
         )
     }
-
-    // #[test]
-    // fn test_gradient() {
-    //     let metadata = std::fs::File::open("test_data/rep_code/metadata.yaml").unwrap();
-    //     let metadata: serde_yaml::Value = serde_yaml::from_reader(metadata).unwrap();
-    //     let num_detectors = metadata["num_detectors"].as_u64().unwrap() as usize;
-
-    //     let detection_events = read_b8_file("test_data/rep_code/detectors.b8", num_detectors).unwrap();
-    //     let num_detectors = detection_events.ncols();
-    //     let all_hyperedges = all_hyperedges_considered(num_detectors, None);
-    //     // divide the hyperedges into clusters
-    //     let (extended_hyperedges, clusters) = cluster_hyperedges(&all_hyperedges);
-    //     // calculate the expectations of each hyperedge
-    //     let expectations = calculate_expectations(&detection_events, &extended_hyperedges);
-    //     let cluster_solver = ClusterSolver::new(clusters.first().unwrap(), &extended_hyperedges, &expectations);
-    //     // dbg!(&cluster_solver.expectations);
-    //     let _residual = residual(&[0.1, 0.1, 0.0], &cluster_solver);
-    //     dbg!(analytical_gradient(&[0.1, 0.1, 0.0], &cluster_solver));
-    //     // let solved_probs = clusters
-    //     //     .iter()
-    //     //     .map(|cluster| solve_cluster(cluster, &extended_hyperedges, &expectations))
-    //     //     .collect::<Result<Vec<_>, Error>>()
-    //     //     .unwrap();
-    // }
 }

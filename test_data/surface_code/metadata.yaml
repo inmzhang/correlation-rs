@@ -1,5 +1,5 @@
 code: surface_code:rotated_memory_z
-distance: 21
-num_detectors: 4400
+distance: 3
+num_detectors: 88
 num_shots: 1000
-rounds: 10
+rounds: 11

@@ -4,8 +4,8 @@ import yaml
 
 def surface_code():
     code = "surface_code:rotated_memory_z"
-    distance = 21
-    rounds = 10
+    distance = 3
+    rounds = 11
     shots = 1000
     circuit = stim.Circuit.generated(
         code,
@@ -81,4 +81,5 @@ def rep_code():
 
 
 if __name__ == '__main__':
-    rep_code()
+    # rep_code()
+    surface_code()
