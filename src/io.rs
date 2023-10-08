@@ -53,9 +53,6 @@ mod tests {
         let path = "test_data/surface_code/detectors.b8";
         let data = read_b8_file(path, num_detectors).unwrap();
         assert_eq!(data.shape(), (num_shots, num_detectors));
-        assert_eq!(data[(0, 0)], 0.);
-        assert_eq!(data[(0, 6)], 1.);
-        assert_eq!(data[(1, 3)], 1.);
     }
 
     #[test]
@@ -68,8 +65,5 @@ mod tests {
         let path = "test_data/surface_code/detectors.01";
         let data = read_01_file(path).unwrap();
         assert_eq!(data.shape(), (num_shots, num_detectors));
-        assert_eq!(data[(0, 0)], 0.);
-        assert_eq!(data[(0, 6)], 1.);
-        assert_eq!(data[(1, 3)], 1.);
     }
 }

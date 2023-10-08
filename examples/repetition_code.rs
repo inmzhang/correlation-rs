@@ -17,7 +17,7 @@ fn run() {
         &edges.row(0).iter().skip(1).take(5).collect::<Vec<_>>()
     );
     // run numerically
-    let res = cal_high_order_correlations(&dets, None, 16, None).unwrap();
+    let res = cal_high_order_correlations(&dets, None, None, None).unwrap();
     let bdy_numeric = (0..num_detectors)
         .map(|i| res[&smallvec![i]])
         .collect::<Vec<_>>();

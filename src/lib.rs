@@ -87,7 +87,7 @@ fn analytical_core(detection_events: &DMatrix<f64>) -> (DVector<f64>, DMatrix<f6
     (correlation_bdy, correlation_edges)
 }
 
-pub type HyperEdge = SmallVec<[usize; 6]>;
+pub type HyperEdge = SmallVec<[usize; 4]>;
 
 type Cluster = Vec<usize>;
 
@@ -99,7 +99,7 @@ type Cluster = Vec<usize>;
 ///
 /// * `hyperedges` - A list of hyperedges. Each hyperedge is a set of detectors.
 ///
-/// * `num_threads` - Number of threads to use in parallel.
+/// * `num_threads` - Number of threads to use in parallel, default to number of cpus.
 ///
 /// * `max_iters` - Number of iterations the optimizer can take.
 ///
@@ -108,8 +108,8 @@ type Cluster = Vec<usize>;
 /// A map from hyperedges to their correlation probabilities.
 pub fn cal_high_order_correlations(
     detection_events: &DMatrix<f64>,
-    hyperedges: Option<Vec<HashSet<usize>>>,
-    num_threads: usize,
+    hyperedges: Option<&[HashSet<usize>]>,
+    num_threads: Option<usize>,
     max_iters: Option<u64>,
 ) -> Result<HashMap<HyperEdge, f64>, Error> {
     let num_detectors = detection_events.ncols();
@@ -119,8 +119,12 @@ pub fn cal_high_order_correlations(
     // calculate the expectations of each hyperedge
     let expectations = calculate_expectations(detection_events, &extended_hyperedges);
     // thread pool to use
-    let pool = create_thread_pool(num_threads);
+    let pool = create_thread_pool(num_threads.unwrap_or(num_cpus::get()));
     // solve each cluster in parallel
+    // let solved_probs = clusters
+    //     .iter()
+    //     .map(|cluster| solve_cluster(cluster, &extended_hyperedges, &expectations, max_iters))
+    //     .collect::<Result<Vec<_>, Error>>()?;
     let solved_probs = pool.install(|| {
         clusters
             .par_iter()
@@ -136,7 +140,7 @@ pub fn cal_high_order_correlations(
 
 fn all_hyperedges_considered(
     num_detectors: usize,
-    hyperedges: Option<Vec<HashSet<usize>>>,
+    hyperedges: Option<&[HashSet<usize>]>,
 ) -> Vec<HyperEdge> {
     let mut all_hyperedges: Vec<HyperEdge> = (0..num_detectors)
         .map(|e| HyperEdge::from_iter(std::iter::once(e)))
@@ -147,8 +151,8 @@ fn all_hyperedges_considered(
             .map(|e| e.into_iter().collect()),
     );
     if let Some(hyperedges) = hyperedges {
-        all_hyperedges.extend(hyperedges.into_iter().map(|e| {
-            let mut hyperedge = HyperEdge::from_iter(e);
+        all_hyperedges.extend(hyperedges.iter().map(|e| {
+            let mut hyperedge = HyperEdge::from_iter(e.clone());
             hyperedge.sort();
             hyperedge
         }));
@@ -242,6 +246,7 @@ impl ClusterSolver {
             .map(|&i| all_hyperedges[i].clone())
             .collect_vec();
         let expectations = cluster.iter().map(|&i| expectations[i]).collect_vec();
+
         let mut intersection = HashMap::with_capacity(hyperedges.len());
         let mut supersets = HashMap::with_capacity(hyperedges.len());
         for hyperedge in &hyperedges {
@@ -312,44 +317,27 @@ fn residual(param: &[f64], cluster: &ClusterSolver) -> f64 {
         .sum()
 }
 
+#[allow(dead_code)]
 fn analytical_gradient(param: &[f64], cluster: &ClusterSolver) -> Array1<f64> {
     let gradients = cluster.hyperedges.iter().enumerate().map(|(i, hyperedge)| {
-        cluster
-            .hyperedges
-            .iter()
-            .zip(&cluster.expectations)
-            .filter_map(|(h, &expect)| {
-                let intersection = &cluster.intersection[h];
-                if intersection.contains(hyperedge) {
-                    Some(
-                        &cluster.supersets[h]
-                            .iter()
-                            .map(|select| {
-                                if select.contains(hyperedge) {
-                                    cluster.prob_within_cluster(
-                                        select,
-                                        intersection,
-                                        param,
-                                        Some(i),
-                                    )
-                                } else {
-                                    -cluster.prob_within_cluster(
-                                        select,
-                                        intersection,
-                                        param,
-                                        Some(i),
-                                    )
-                                }
-                            })
-                            .sum::<f64>()
-                            * 2.0
-                            * (equation_lhs(h, param, cluster) - expect),
-                    )
-                } else {
-                    None
+        let mut sum = 0.0;
+        for (h, &expect) in cluster.hyperedges.iter().zip(&cluster.expectations) {
+            let intersection = &cluster.intersection[h];
+            if intersection.contains(hyperedge) {
+                let equation_diff = 2.0 * (equation_lhs(h, param, cluster) - expect);
+                for select in &cluster.supersets[h] {
+                    let multiplier = if select.contains(hyperedge) {
+                        1.0
+                    } else {
+                        -1.0
+                    };
+                    sum += multiplier
+                        * cluster.prob_within_cluster(select, intersection, param, Some(i))
+                        * equation_diff;
                 }
-            })
-            .sum::<f64>()
+            }
+        }
+        sum
     });
     Array1::from_iter(gradients)
 }
@@ -367,8 +355,14 @@ impl Gradient for ClusterSolver {
     type Param = Array1<f64>;
     type Gradient = Array1<f64>;
     fn gradient(&self, param: &Self::Param) -> Result<Self::Gradient, Error> {
-        // Ok((*param).forward_diff(&|x| cluster_cost(x.as_slice().unwrap(), self)))
-        Ok(analytical_gradient(param.as_slice().unwrap(), self))
+        cfg_if::cfg_if! {
+            if #[cfg(feature = "finite-diff")] {
+                use finitediff::FiniteDiff;
+                Ok((*param).forward_diff(&|x| residual(x.as_slice().unwrap(), self)))
+            } else {
+                Ok(analytical_gradient(param.as_slice().unwrap(), self))
+            }
+        }
     }
 }
 
@@ -391,7 +385,7 @@ fn solve_cluster(
         .configure(|state| {
             state
                 .param(init_param)
-                .max_iters(max_iters.unwrap_or(10 * n_params as u64))
+                .max_iters(max_iters.unwrap_or(20 * n_params as u64))
                 .target_cost(0.0)
         })
         .run()?;
@@ -404,56 +398,53 @@ fn adjust_probabilities(
     solved_probs: &[Vec<f64>],
 ) -> HashMap<HyperEdge, f64> {
     let mut adjusted_probs = HashMap::with_capacity(all_hyperedges.len());
-    // largest hyperedges within each cluster do not need adjustment
-    clusters
-        .iter()
-        .zip(solved_probs)
-        .for_each(|(cluster, probs)| {
-            let i = *cluster.last().unwrap();
-            adjusted_probs.insert(all_hyperedges[i].clone(), *probs.last().unwrap());
-        });
+    // cache for lengths
+    let hyperedge_lengths: Vec<usize> = all_hyperedges.iter().map(|h| h.len()).collect();
+    // Insert largest hyperedges directly without adjustment
+    for (cluster, probs) in clusters.iter().zip(solved_probs) {
+        let i = *cluster.last().unwrap();
+        adjusted_probs.insert(all_hyperedges[i].clone(), *probs.last().unwrap());
+    }
+
     let mut weight_to_adjust = all_hyperedges[*clusters[0].last().unwrap()].len() - 1;
     while weight_to_adjust > 0 {
         let mut collected_probs = HashMap::new();
         // adjust the probability of hyperedges with weight
         // weight_to_adjust in each clusters by the probability
         // of the hyperedges with weight greater than that
-        for (cluster, probs) in clusters.iter().zip(solved_probs).filter(|&(cluster, _)| {
-            all_hyperedges[*cluster.last().unwrap()].len() > weight_to_adjust
-        }) {
+        for (cluster, probs) in clusters
+            .iter()
+            .zip(solved_probs)
+            .filter(|&(cluster, _)| hyperedge_lengths[*cluster.last().unwrap()] > weight_to_adjust)
+        {
             for (&hyperedge_i, &prob_this) in cluster
                 .iter()
                 .zip(probs)
-                .filter(|&(i, _)| all_hyperedges[*i].len() == weight_to_adjust)
+                .filter(|&(i, _)| hyperedge_lengths[*i] == weight_to_adjust)
             {
                 let hyperedge = &all_hyperedges[hyperedge_i];
                 let adjusted_prob = adjusted_probs
                     .iter()
                     .filter_map(|(h, &p)| {
-                        let index = all_hyperedges.iter().position(|x| x == h).unwrap();
-                        if !cluster.contains(&index) && hyperedge.iter().all(|i| h.contains(i)) {
-                            Some(p)
-                        } else {
-                            None
+                        if cluster.iter().any(|&i| &all_hyperedges[i] == h)
+                            || hyperedge.iter().any(|i| !h.contains(i))
+                        {
+                            return None;
                         }
+                        Some(p)
                     })
                     .fold(prob_this, |p, q| (p - q) / (1.0 - 2.0 * q));
                 collected_probs
-                    .entry(hyperedge.clone())
-                    .or_insert(Vec::new())
-                    .push(adjusted_prob);
-                collected_probs
-                    .entry(hyperedge.clone())
-                    .or_insert(Vec::new())
+                    .entry(hyperedge)
+                    .or_insert_with(Vec::new)
                     .push(adjusted_prob);
             }
         }
         // average the probabilities of the same hyperedge in different clusters
-        collected_probs.into_iter().for_each(|(h, probs)| {
-            let len = probs.len() as f64;
-            let prob = probs.into_iter().sum::<f64>() / len;
-            adjusted_probs.insert(h, prob);
-        });
+        for (h, probs) in collected_probs {
+            let prob = probs.iter().sum::<f64>() / probs.len() as f64;
+            adjusted_probs.insert(h.clone(), prob);
+        }
         weight_to_adjust -= 1;
     }
     adjusted_probs
@@ -500,7 +491,7 @@ mod tests {
                 HyperEdge::from_slice(&[1, 2, 3]),
             ])
             .collect::<HashSet<usize>>(),
-            HashSet::from([0, 3])
+            HashSet::from_iter([0, 3].into_iter())
         );
 
         assert_eq!(
@@ -510,7 +501,7 @@ mod tests {
                 HyperEdge::from_slice(&[2, 3, 4]),
             ])
             .collect::<HashSet<usize>>(),
-            HashSet::from([0, 2, 4])
+            HashSet::from_iter([0, 2, 4].into_iter())
         )
     }
 }
