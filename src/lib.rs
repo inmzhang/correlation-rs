@@ -1,8 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
 use argmin::core::{CostFunction, Error, Executor, Gradient};
-use argmin::solver::conjugategradient::NonlinearConjugateGradient;
 use argmin::solver::conjugategradient::beta::PolakRibiere;
+use argmin::solver::conjugategradient::NonlinearConjugateGradient;
 use argmin::solver::linesearch::MoreThuenteLineSearch;
 use itertools::Itertools;
 use nalgebra::{DMatrix, DVector};
@@ -293,14 +293,12 @@ impl ClusterSolver {
 }
 
 #[inline]
-fn equation_lhs(
-    hyperedge: &HyperEdge,
-    param: &[f64],
-    cluster: &ClusterSolver,
-) -> f64 {
+fn equation_lhs(hyperedge: &HyperEdge, param: &[f64], cluster: &ClusterSolver) -> f64 {
     cluster.supersets[hyperedge]
         .iter()
-        .map(|select| cluster.prob_within_cluster(select, &cluster.intersection[hyperedge], param, None))
+        .map(|select| {
+            cluster.prob_within_cluster(select, &cluster.intersection[hyperedge], param, None)
+        })
         .sum::<f64>()
 }
 
@@ -315,34 +313,44 @@ fn residual(param: &[f64], cluster: &ClusterSolver) -> f64 {
 }
 
 fn analytical_gradient(param: &[f64], cluster: &ClusterSolver) -> Array1<f64> {
-    let gradients = cluster
-        .hyperedges
-        .iter()
-        .enumerate()
-        .map(|(i, hyperedge)| {
-            cluster
-                .hyperedges
-                .iter()
-                .zip(&cluster.expectations)
-                .filter_map(|(h, &expect)| {
-                    let intersection = &cluster.intersection[h];
-                    if intersection.contains(hyperedge) {
-                        Some(&cluster
-                            .supersets[h]
+    let gradients = cluster.hyperedges.iter().enumerate().map(|(i, hyperedge)| {
+        cluster
+            .hyperedges
+            .iter()
+            .zip(&cluster.expectations)
+            .filter_map(|(h, &expect)| {
+                let intersection = &cluster.intersection[h];
+                if intersection.contains(hyperedge) {
+                    Some(
+                        &cluster.supersets[h]
                             .iter()
                             .map(|select| {
                                 if select.contains(hyperedge) {
-                                    cluster.prob_within_cluster(select, intersection, param, Some(i))
+                                    cluster.prob_within_cluster(
+                                        select,
+                                        intersection,
+                                        param,
+                                        Some(i),
+                                    )
                                 } else {
-                                    -cluster.prob_within_cluster(select, intersection, param, Some(i))
+                                    -cluster.prob_within_cluster(
+                                        select,
+                                        intersection,
+                                        param,
+                                        Some(i),
+                                    )
                                 }
-                            }).sum::<f64>() * 2.0 * (equation_lhs(h, param, cluster) - expect))
-                    } else {
-                        None
-                    }
-                })
-                .sum::<f64>()
-        });
+                            })
+                            .sum::<f64>()
+                            * 2.0
+                            * (equation_lhs(h, param, cluster) - expect),
+                    )
+                } else {
+                    None
+                }
+            })
+            .sum::<f64>()
+    });
     Array1::from_iter(gradients)
 }
 
@@ -410,11 +418,9 @@ fn adjust_probabilities(
         // adjust the probability of hyperedges with weight
         // weight_to_adjust in each clusters by the probability
         // of the hyperedges with weight greater than that
-        for (cluster, probs) in clusters
-            .iter()
-            .zip(solved_probs)
-            .filter(|&(cluster, _)| all_hyperedges[*cluster.last().unwrap()].len() > weight_to_adjust)
-        {
+        for (cluster, probs) in clusters.iter().zip(solved_probs).filter(|&(cluster, _)| {
+            all_hyperedges[*cluster.last().unwrap()].len() > weight_to_adjust
+        }) {
             for (&hyperedge_i, &prob_this) in cluster
                 .iter()
                 .zip(probs)
