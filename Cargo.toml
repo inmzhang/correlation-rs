@@ -17,6 +17,7 @@ ndarray-linalg = { version = "0.16", features = ["openblas-static"] }
 cfg-if = "1.0.0"
 #rustc-hash = "1.1.0"
 num_cpus = "1.15.0"
+kahan = "0.1.4"
 finitediff = { version = "0.1.4", features = ["ndarray"], optional = true }
 
 [dev-dependencies]

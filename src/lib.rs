@@ -5,6 +5,7 @@ use argmin::solver::conjugategradient::beta::PolakRibiere;
 use argmin::solver::conjugategradient::NonlinearConjugateGradient;
 use argmin::solver::linesearch::MoreThuenteLineSearch;
 use itertools::Itertools;
+use kahan::{KahanSummator, KahanSum};
 use nalgebra::{DMatrix, DVector};
 use ndarray::Array1;
 use rayon::prelude::*;
@@ -298,33 +299,33 @@ impl ClusterSolver {
 }
 
 #[inline]
-fn equation_lhs(hyperedge: &HyperEdge, param: &[f64], cluster: &ClusterSolver) -> f64 {
+fn equation_lhs(hyperedge: &HyperEdge, param: &[f64], cluster: &ClusterSolver) -> KahanSum<f64> {
     cluster.supersets[hyperedge]
         .iter()
         .map(|select| {
             cluster.prob_within_cluster(select, &cluster.intersection[hyperedge], param, None)
         })
-        .sum::<f64>()
+        .kahan_sum()
 }
 
-fn residual(param: &[f64], cluster: &ClusterSolver) -> f64 {
+fn residual(param: &[f64], cluster: &ClusterSolver) -> KahanSum<f64> {
     debug_assert_eq!(param.len(), cluster.hyperedges.len());
     cluster
         .hyperedges
         .iter()
         .zip(cluster.expectations.iter())
-        .map(|(hyperedge, &expect)| (equation_lhs(hyperedge, param, cluster) - expect).powf(2.0))
-        .sum()
+        .map(|(hyperedge, &expect)| (equation_lhs(hyperedge, param, cluster) + (-expect)).sum().powf(2.0))
+        .kahan_sum()
 }
 
 #[allow(dead_code)]
 fn analytical_gradient(param: &[f64], cluster: &ClusterSolver) -> Array1<f64> {
     let gradients = cluster.hyperedges.iter().enumerate().map(|(i, hyperedge)| {
-        let mut sum = 0.0;
+        let mut sum = KahanSum::new();
         for (h, &expect) in cluster.hyperedges.iter().zip(&cluster.expectations) {
             let intersection = &cluster.intersection[h];
             if intersection.contains(hyperedge) {
-                let equation_diff = 2.0 * (equation_lhs(h, param, cluster) - expect);
+                let equation_diff = 2.0 * (equation_lhs(h, param, cluster) + (-expect)).sum();
                 for select in &cluster.supersets[h] {
                     let multiplier = if select.contains(hyperedge) {
                         1.0
@@ -337,7 +338,7 @@ fn analytical_gradient(param: &[f64], cluster: &ClusterSolver) -> Array1<f64> {
                 }
             }
         }
-        sum
+        sum.sum()
     });
     Array1::from_iter(gradients)
 }
@@ -347,7 +348,7 @@ impl CostFunction for ClusterSolver {
     type Output = f64;
 
     fn cost(&self, param: &Self::Param) -> Result<Self::Output, Error> {
-        Ok(residual(param.as_slice().unwrap(), self))
+        Ok(residual(param.as_slice().unwrap(), self).sum())
     }
 }
 
@@ -358,7 +359,7 @@ impl Gradient for ClusterSolver {
         cfg_if::cfg_if! {
             if #[cfg(feature = "finite-diff")] {
                 use finitediff::FiniteDiff;
-                Ok((*param).forward_diff(&|x| residual(x.as_slice().unwrap(), self)))
+                Ok((*param).forward_diff(&|x| residual(x.as_slice().unwrap(), self)).sum())
             } else {
                 Ok(analytical_gradient(param.as_slice().unwrap(), self))
             }

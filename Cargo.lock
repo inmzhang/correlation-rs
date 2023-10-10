@@ -197,6 +197,7 @@ dependencies = [
  "cfg-if",
  "finitediff",
  "itertools",
+ "kahan",
  "nalgebra",
  "ndarray",
  "ndarray-linalg",
@@ -482,6 +483,15 @@ name = "itoa"
 version = "1.0.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "af150ab688ff2122fcef229be89cb50dd66af9e01a4ff320cc137eecc9bacc38"
+
+[[package]]
+name = "kahan"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f21cb50baffe6384be28e8272456e23563bd9dda67abc3bcbf51075fbb7d1f79"
+dependencies = [
+ "num-traits",
+]
 
 [[package]]
 name = "katexit"

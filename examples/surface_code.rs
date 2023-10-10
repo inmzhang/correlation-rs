@@ -75,7 +75,11 @@ fn run() {
         "Solved hyperedge probabilities: {:?}",
         show_hyperedges
             .iter()
-            .map(|(h, _)| res[&h.iter().copied().collect::<HyperEdge>()])
+            .map(|(h, _)| {
+                let mut hyperedge = h.iter().copied().collect::<HyperEdge>();
+                hyperedge.sort();
+                res[&hyperedge]
+            })
             .collect_vec()
     );
     println!(
