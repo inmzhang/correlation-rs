@@ -1,9 +1,14 @@
 use std::collections::{HashMap, HashSet};
+use std::time::Instant;
 
 use argmin::core::{CostFunction, Error, Executor, Gradient};
 use argmin::solver::conjugategradient::beta::PolakRibiere;
 use argmin::solver::conjugategradient::NonlinearConjugateGradient;
-use argmin::solver::linesearch::MoreThuenteLineSearch;
+use argmin::solver::linesearch::condition::ArmijoCondition;
+use argmin::solver::linesearch::{
+    BacktrackingLineSearch, HagerZhangLineSearch, MoreThuenteLineSearch,
+};
+use argmin::solver::quasinewton::LBFGS;
 use itertools::Itertools;
 use kahan::{KahanSummator, KahanSum};
 use nalgebra::{DMatrix, DVector};
@@ -122,10 +127,6 @@ pub fn cal_high_order_correlations(
     // thread pool to use
     let pool = create_thread_pool(num_threads.unwrap_or(num_cpus::get()));
     // solve each cluster in parallel
-    // let solved_probs = clusters
-    //     .iter()
-    //     .map(|cluster| solve_cluster(cluster, &extended_hyperedges, &expectations, max_iters))
-    //     .collect::<Result<Vec<_>, Error>>()?;
     let solved_probs = pool.install(|| {
         clusters
             .par_iter()
@@ -236,8 +237,10 @@ fn calculate_expectations(
 struct ClusterSolver {
     hyperedges: Vec<HyperEdge>,
     expectations: Vec<f64>,
-    intersection: HashMap<HyperEdge, Vec<HyperEdge>>,
-    supersets: HashMap<HyperEdge, Vec<Vec<HyperEdge>>>,
+
+    // for a given HyperEdge index, we store the intersection list in two parts, with the start of the second half marked by the integer stored with the index vector
+    // the first part contains the indicies of intersection hyperedges that that also part of the superset, the second half contains those that do not.
+    intersections_per_superset: HashMap<usize, Vec<(usize, Vec<usize>)>>,
 }
 
 impl ClusterSolver {
@@ -248,99 +251,225 @@ impl ClusterSolver {
             .collect_vec();
         let expectations = cluster.iter().map(|&i| expectations[i]).collect_vec();
 
-        let mut intersection = HashMap::with_capacity(hyperedges.len());
+        let mut intersections = HashMap::with_capacity(hyperedges.len());
         let mut supersets = HashMap::with_capacity(hyperedges.len());
-        for hyperedge in &hyperedges {
-            let intersect = intersects(hyperedge, &hyperedges);
+        for (index, hyperedge) in hyperedges.iter().enumerate() {
+            let intersect = intersects(&hyperedges, index);
             let superset = powerset(&intersect)
                 .into_iter()
                 .filter(|set| {
-                    let sym_diff = symmetric_difference(set).collect_vec();
+                    let sym_diff = symmetric_difference(set, &hyperedges).collect_vec();
                     hyperedge.iter().all(|i| sym_diff.contains(i))
                 })
                 .collect_vec();
-            intersection.insert(hyperedge.clone(), intersect);
-            supersets.insert(hyperedge.clone(), superset);
+            intersections.insert(index, intersect);
+            supersets.insert(index, superset);
         }
+
+        let mut intersections_per_superset = HashMap::new();
+
+        for index in 0..hyperedges.len() {
+            let intersection = &intersections[&index];
+            let superset = &supersets[&index];
+
+            let data = superset
+                .iter()
+                .map(|select| {
+
+                    // First list all intersection Hyperedges that are part of this superset
+                    let mut v = intersection
+                        .iter()
+                        .cloned()
+                        .filter(|i| select.contains(i))
+                        .collect_vec();
+
+                    // Record the location of the changeover
+                    let l = v.len();
+
+                    // Second list all intersection Hyperedges that are NOT part of this superset
+                    v.extend(
+                        intersection
+                            .iter()
+                            .cloned()
+                            .filter(|i| !select.contains(i))
+                            .collect_vec(),
+                    );
+                    (l, v)
+                })
+                .collect_vec();
+
+            intersections_per_superset.insert(index, data);
+        }
+
         Self {
             hyperedges,
             expectations,
-            intersection,
-            supersets,
+
+            intersections_per_superset,
         }
     }
 
-    fn prob_within_cluster(
-        &self,
-        selected: &[HyperEdge],
-        intersection: &[HyperEdge],
-        probs: &[f64],
-        filtering: Option<usize>,
-    ) -> f64 {
-        let mut prob = 1.0;
-        self.hyperedges
-            .iter()
-            .enumerate()
-            .filter(|&(_, h)| intersection.contains(h))
-            .for_each(|(i, h)| {
-                if let Some(filter) = filtering {
-                    if i == filter {
-                        return;
-                    }
-                }
-                if selected.contains(h) {
-                    prob *= probs[i];
-                } else {
-                    prob *= 1.0 - probs[i];
-                }
-            });
-        prob
-    }
+    // #[inline]
+    // fn prob_within_cluster(
+    //     selected: &[usize],
+    //     intersection: &[usize],
+    //     probs: &[f64],
+    //     filtering: Option<usize>,
+    // ) -> f64 {
+    //     let mut prob = 1.0;
+
+    //     intersection
+    //         .iter()
+    //         .filter(|&&i| filtering.map(|f| f != i).unwrap_or(true))
+    //         .for_each(|&i| {
+    //             if selected.contains(&i) {
+    //                 prob *= probs[i];
+    //             } else {
+    //                 prob *= 1.0 - probs[i];
+    //             }
+    //         });
+    //     prob
+    // }
 }
 
 #[inline]
-fn equation_lhs(hyperedge: &HyperEdge, param: &[f64], cluster: &ClusterSolver) -> KahanSum<f64> {
-    cluster.supersets[hyperedge]
+fn equation_lhs(hyperedge_index: usize, param: &[f64], cluster: &ClusterSolver) -> KahanSum<f64> {
+    cluster.intersections_per_superset[&hyperedge_index]
         .iter()
-        .map(|select| {
-            cluster.prob_within_cluster(select, &cluster.intersection[hyperedge], param, None)
+        .map(|(l, v)| {
+            let mut prob = 1.0;
+            for &s in &v[..*l] {
+                prob *= param[s];
+            }
+
+            for &ns in &v[*l..] {
+                prob *= 1.0 - param[ns];
+            }
+            prob
         })
         .kahan_sum()
 }
 
-fn residual(param: &[f64], cluster: &ClusterSolver) -> KahanSum<f64> {
+fn sum_squared_residuals(param: &[f64], cluster: &ClusterSolver) -> KahanSum<f64> {
     debug_assert_eq!(param.len(), cluster.hyperedges.len());
-    cluster
-        .hyperedges
-        .iter()
+    (0..cluster.hyperedges.len())
         .zip(cluster.expectations.iter())
-        .map(|(hyperedge, &expect)| (equation_lhs(hyperedge, param, cluster) + (-expect)).sum().powf(2.0))
-        .kahan_sum()
+        .fold(KahanSum::new(), |acc, (i, &expect)| {
+            let residual = equation_lhs(i, param, cluster) + (-expect);
+            acc + residual.sum() * residual.sum()
+            //((KahanSum::new_with_value(residual.err() * residual.err()) + 2.0 * residual.sum() * residual.err()) + residual.sum() * residual.sum()) + acc
+        })
 }
+
+// #[allow(dead_code)]
+// fn analytical_gradient(param: &[f64], cluster: &ClusterSolver) -> Array1<f64> {
+//     let mut gradients = vec![0.0; cluster.hyperedges.len()];
+//     for (hi, &expect) in (0..cluster.hyperedges.len()).zip(&cluster.expectations) {
+//         let intersection = &cluster.intersection[&hi];
+//         let equation_diff = 2.0 * (equation_lhs(&hi, param, cluster) + (-expect)).sum();
+//         for select in &cluster.supersets[&hi] {
+//             for &i in intersection.iter() {
+//                     let multiplier = if select.contains(&i) {
+//                         1.0
+//                     } else {
+//                         -1.0
+//                     };
+//                     gradients[i] += multiplier
+//                         * ClusterSolver::prob_within_cluster(select, intersection, param, Some(i))
+//                         * equation_diff;
+//             }
+//         }
+//     }
+//     Array1::from_vec(gradients)
+// }
+
+// #[allow(dead_code)]
+// fn analytical_gradient(param: &[f64], cluster: &ClusterSolver) -> Array1<f64> {
+//     let mut gradients = vec![0.0; cluster.hyperedges.len()];
+
+//         'outer: for (outer_index, &expect) in (0..cluster.hyperedges.len()).zip(&cluster.expectations) {
+//             let intersection = cluster.intersection[&outer_index].as_slice();
+//             let equation_diff = 2.0 * (equation_lhs(outer_index, param, cluster) + (-expect)).sum();
+
+//             debug_assert!(intersection.windows(2).all(|x| x[0] <= x[1]));
+//             for select in &cluster.supersets[&outer_index] {
+//                 for &i in intersection.iter() {
+
+//                         let multiplier = if select.contains(&i) {
+//                             1.0
+//                         } else {
+//                             -1.0
+//                         };
+//                         gradients[i] += multiplier
+//                             * ClusterSolver::prob_within_cluster(select, intersection, param, Some(i))
+//                             * equation_diff;
+//                 }
+//             }
+
+//         }
+
+//     Array1::from_vec(gradients)
+// }
 
 #[allow(dead_code)]
 fn analytical_gradient(param: &[f64], cluster: &ClusterSolver) -> Array1<f64> {
-    let gradients = cluster.hyperedges.iter().enumerate().map(|(i, hyperedge)| {
-        let mut sum = KahanSum::new();
-        for (h, &expect) in cluster.hyperedges.iter().zip(&cluster.expectations) {
-            let intersection = &cluster.intersection[h];
-            if intersection.contains(hyperedge) {
-                let equation_diff = 2.0 * (equation_lhs(h, param, cluster) + (-expect)).sum();
-                for select in &cluster.supersets[h] {
-                    let multiplier = if select.contains(hyperedge) {
-                        1.0
-                    } else {
-                        -1.0
-                    };
-                    sum += multiplier
-                        * cluster.prob_within_cluster(select, intersection, param, Some(i))
-                        * equation_diff;
+    let mut gradients = vec![KahanSum::new(); cluster.hyperedges.len()];
+
+    for (hyperedge_index, &expect) in (0..cluster.hyperedges.len()).zip(&cluster.expectations) {
+        let equation_diff = 2.0 * (equation_lhs(hyperedge_index, param, cluster) + (-expect)).sum();
+        for (l, v) in &cluster.intersections_per_superset[&hyperedge_index] {
+            for &s in &v[..*l] {
+                let mut prob = 1.0;
+                for &s in v[..*l].iter().filter(|&&i| i != s) {
+                    prob *= param[s];
                 }
+
+                for &ns in v[*l..].iter().filter(|&&i| i != s) {
+                    prob *= 1.0 - param[ns];
+                }
+
+                gradients[s] += prob * equation_diff;
+            }
+
+            for &ns in &v[*l..] {
+                let mut prob = 1.0;
+                for &s in v[..*l].iter().filter(|&&i| i != ns) {
+                    prob *= param[s];
+                }
+
+                for &ns in v[*l..].iter().filter(|&&i| i != ns) {
+                    prob *= 1.0 - param[ns];
+                }
+
+                gradients[ns] += -prob * equation_diff;
             }
         }
-        sum.sum()
-    });
-    Array1::from_iter(gradients)
+    }
+
+    Array1::from_iter(gradients.iter().map(KahanSum::sum))
+}
+
+#[allow(dead_code)]
+fn analytical_gradient_relative_error(
+    param: &Array1<f64>,
+    cluster: &ClusterSolver,
+    step_size: f64,
+) -> f64 {
+    let grad = analytical_gradient(param.as_slice().unwrap(), cluster);
+    let cost_0 = sum_squared_residuals(param.as_slice().unwrap(), cluster);
+    let grad_norm = grad.dot(&grad).sqrt();
+
+    let step_vector1 = grad.clone() * (step_size / grad_norm);
+
+    let param_1 = step_vector1 + param;
+
+    let cost_1 = sum_squared_residuals(param_1.as_slice().unwrap(), cluster);
+
+    let expected_change = step_size * grad_norm;
+
+    let actual_change = cost_1.sum() - cost_0.sum();
+
+    (expected_change - actual_change).abs() / expected_change.max(actual_change)
 }
 
 impl CostFunction for ClusterSolver {
@@ -348,7 +477,16 @@ impl CostFunction for ClusterSolver {
     type Output = f64;
 
     fn cost(&self, param: &Self::Param) -> Result<Self::Output, Error> {
-        Ok(residual(param.as_slice().unwrap(), self).sum())
+        // let start = Instant::now();
+        let res = sum_squared_residuals(param.as_slice().unwrap(), self).sum();
+
+        // let re1 = analytical_gradient_relative_error(param, self, 1e-5);
+        // let re2 = analytical_gradient_relative_error(param, self, -1e-5);
+
+        // let elapsed = start.elapsed().as_micros();
+        // println!("{res}\t{elapsed}us");
+
+        Ok(res)
     }
 }
 
@@ -359,9 +497,13 @@ impl Gradient for ClusterSolver {
         cfg_if::cfg_if! {
             if #[cfg(feature = "finite-diff")] {
                 use finitediff::FiniteDiff;
-                Ok((*param).forward_diff(&|x| residual(x.as_slice().unwrap(), self)).sum())
+                Ok((*param).forward_diff(&|x| sum_squared_residuals(x.as_slice().unwrap(), self)))
             } else {
-                Ok(analytical_gradient(param.as_slice().unwrap(), self))
+                // let start = Instant::now();
+                let grad = analytical_gradient(param.as_slice().unwrap(), self);
+                // let elapsed = start.elapsed().as_micros();
+                // println!("\t{elapsed}us");
+                Ok(grad)
             }
         }
     }
@@ -375,19 +517,25 @@ fn solve_cluster(
 ) -> Result<Vec<f64>, Error> {
     let problem = ClusterSolver::new(cluster, all_hyperedges, expectations);
     let n_params = cluster.len();
-    let init_param = Array1::from_elem(n_params, 0.001);
+    let init_param = Array1::from_elem(n_params, 1.0 / n_params as f64);
     let linesearch = MoreThuenteLineSearch::new();
-    let beta_method = PolakRibiere::new();
-    let solver = NonlinearConjugateGradient::new(linesearch, beta_method)
-        .restart_iters(100)
-        .restart_orthogonality(0.1);
+    // let linesearch = BacktrackingLineSearch::new(ArmijoCondition::new(0.0001f64).unwrap());
+    // let linesearch = HagerZhangLineSearch::new();
+    // let beta_method = PolakRibiere::new();
+
+    let solver = LBFGS::new(linesearch, 3);
+
+    // let solver = NonlinearConjugateGradient::new(linesearch, beta_method)
+    //     .restart_iters(100)
+    //     .restart_orthogonality(0.1);
+
     // FINE TUNE OF THE SOLVER PARAMS IS NEEDED
     let res = Executor::new(problem, solver)
         .configure(|state| {
             state
                 .param(init_param)
                 .max_iters(max_iters.unwrap_or(20 * n_params as u64))
-                .target_cost(0.0)
+                .target_cost(1e-12) //1e-6
         })
         .run()?;
     Ok(res.state.best_param.unwrap().into_iter().collect_vec())
@@ -452,26 +600,37 @@ fn adjust_probabilities(
 }
 
 #[inline]
-fn powerset(hyperedges: &[HyperEdge]) -> Vec<Vec<HyperEdge>> {
-    (1..=hyperedges.len())
-        .flat_map(move |k| hyperedges.iter().cloned().combinations(k))
+fn powerset(hyperedge_indicies: &[usize]) -> Vec<Vec<usize>> {
+    (1..=hyperedge_indicies.len())
+        .flat_map(move |k| hyperedge_indicies.iter().cloned().combinations(k))
+        .map(|mut v| {
+            v.sort_unstable();
+            v
+        })
         .collect_vec()
 }
 
+/// Returns the indicies of all HyperEdges which have a component in common with the target HyperEdge
 #[inline]
-fn intersects(target: &HyperEdge, others: &[HyperEdge]) -> Vec<HyperEdge> {
-    others
+fn intersects(hyperedges: &[HyperEdge], target_index: usize) -> Vec<usize> {
+    let target = &hyperedges[target_index];
+    hyperedges
         .iter()
-        .filter(|&h| h.iter().any(|&e| target.contains(&e)))
-        .cloned()
+        .enumerate()
+        .filter(|(_, h)| h.iter().any(|&e| target.contains(&e)))
+        .map(|(i, _h)| i)
+        .sorted_unstable()
         .collect_vec()
 }
 
 #[inline]
-fn symmetric_difference(hyperedges: &[HyperEdge]) -> impl Iterator<Item = usize> {
+fn symmetric_difference(
+    hyperedge_indicies: &[usize],
+    hyperedges: &[HyperEdge],
+) -> impl Iterator<Item = usize> {
     let mut counts = HashMap::new();
-    for hyperedge in hyperedges {
-        for &e in hyperedge {
+    for &index in hyperedge_indicies {
+        for &e in &hyperedges[index] {
             *counts.entry(e).or_insert(0) += 1;
         }
     }
@@ -485,23 +644,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_symmetric_difference() {
+    fn test_symmetric_difference1() {
+        let hyper_edges = [
+            HyperEdge::from_slice(&[0, 1, 2]),
+            HyperEdge::from_slice(&[1, 2, 3]),
+        ];
+        let set_indicies = [0, 1];
         assert_eq!(
-            symmetric_difference(&[
-                HyperEdge::from_slice(&[0, 1, 2]),
-                HyperEdge::from_slice(&[1, 2, 3]),
-            ])
-            .collect::<HashSet<usize>>(),
+            symmetric_difference(&set_indicies, &hyper_edges).collect::<HashSet<usize>>(),
             HashSet::from_iter([0, 3].into_iter())
         );
+    }
+
+    #[test]
+    fn test_symmetric_difference2() {
+        let hyperedges = [
+            HyperEdge::from_slice(&[0, 1, 2]),
+            HyperEdge::from_slice(&[1, 2, 3]),
+            HyperEdge::from_slice(&[2, 3, 4]),
+        ];
+        let set_indicies = [0, 1, 2];
 
         assert_eq!(
-            symmetric_difference(&[
-                HyperEdge::from_slice(&[0, 1, 2]),
-                HyperEdge::from_slice(&[1, 2, 3]),
-                HyperEdge::from_slice(&[2, 3, 4]),
-            ])
-            .collect::<HashSet<usize>>(),
+            symmetric_difference(&set_indicies, &hyperedges).collect::<HashSet<usize>>(),
             HashSet::from_iter([0, 2, 4].into_iter())
         )
     }
