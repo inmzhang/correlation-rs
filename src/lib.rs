@@ -238,9 +238,68 @@ struct ClusterSolver {
     hyperedges: Vec<HyperEdge>,
     expectations: Vec<f64>,
 
-    // for a given HyperEdge index, we store the intersection list in two parts, with the start of the second half marked by the integer stored with the index vector
-    // the first part contains the indicies of intersection hyperedges that that also part of the superset, the second half contains those that do not.
-    intersections_per_superset: HashMap<usize, Vec<(usize, Vec<usize>)>>,
+    /// The key is the target Hyperedge.
+    ///
+    /// For each "select" set in the SuperSet of the target we store the intersection set for the target, split by whether they are included the the "select" set.
+    /// For a given HyperEdge index, we store the intersection list in two parts, with the start of the second half marked with the usize in the tuple.
+    /// The first part contains the indicies of intersection hyperedges that where also part of the superset, the second half contains those that where not part of it.
+    /// Doing this during problem setup allows to avoid many "contains" search loops during iterations.
+    intersections_per_superset: HashMap<usize, Vec<SplitIntersection>>,
+}
+
+struct SplitIntersection {
+    intersection: Vec<usize>,
+    start_of_nonincluded: usize,
+}
+
+impl SplitIntersection {
+    #[inline]
+    fn prob_within_cluster(&self, param: &[f64], skip: Option<usize>) -> f64 {
+        // let mut prob = 1.0;
+        // for &s in self.included().iter() {
+        //     if skip.map(|skip| s != skip).unwrap_or(true) {
+        //         prob *= param[s];
+        //     }
+        // }
+
+        // for &ns in self.nonincluded().iter() {
+        //     if skip.map(|skip| ns != skip).unwrap_or(true) {
+        //         prob *= 1.0 - param[ns];
+        //     }
+        // }
+        self.prob_within_cluster_included(param, skip) * self.prob_within_cluster_nonincluded(param, skip)
+    }
+
+    #[inline]
+    fn prob_within_cluster_included(&self, param: &[f64], skip: Option<usize>) -> f64 {
+        let mut prob = 1.0;
+        for &s in self.included().iter() {
+            if skip.map(|skip| s != skip).unwrap_or(true) {
+                prob *= param[s];
+            }
+        }
+        prob
+    }
+
+    #[inline]
+    fn prob_within_cluster_nonincluded(&self, param: &[f64], skip: Option<usize>) -> f64 {
+        let mut prob = 1.0;
+        for &ns in self.nonincluded().iter() {
+            if skip.map(|skip| ns != skip).unwrap_or(true) {
+                prob *= 1.0 - param[ns];
+            }
+        }
+        prob
+    }
+
+
+    fn included(&self) -> &[usize] {
+        &self.intersection[..self.start_of_nonincluded]
+    }
+
+    fn nonincluded(&self) -> &[usize] {
+        &self.intersection[self.start_of_nonincluded..]
+    }
 }
 
 impl ClusterSolver {
@@ -275,7 +334,6 @@ impl ClusterSolver {
             let data = superset
                 .iter()
                 .map(|select| {
-
                     // First list all intersection Hyperedges that are part of this superset
                     let mut v = intersection
                         .iter()
@@ -284,7 +342,7 @@ impl ClusterSolver {
                         .collect_vec();
 
                     // Record the location of the changeover
-                    let l = v.len();
+                    let start_of_nonincluded = v.len();
 
                     // Second list all intersection Hyperedges that are NOT part of this superset
                     v.extend(
@@ -294,7 +352,11 @@ impl ClusterSolver {
                             .filter(|i| !select.contains(i))
                             .collect_vec(),
                     );
-                    (l, v)
+
+                    SplitIntersection {
+                        intersection: v,
+                        start_of_nonincluded,
+                    }
                 })
                 .collect_vec();
 
@@ -308,44 +370,14 @@ impl ClusterSolver {
             intersections_per_superset,
         }
     }
-
-    // #[inline]
-    // fn prob_within_cluster(
-    //     selected: &[usize],
-    //     intersection: &[usize],
-    //     probs: &[f64],
-    //     filtering: Option<usize>,
-    // ) -> f64 {
-    //     let mut prob = 1.0;
-
-    //     intersection
-    //         .iter()
-    //         .filter(|&&i| filtering.map(|f| f != i).unwrap_or(true))
-    //         .for_each(|&i| {
-    //             if selected.contains(&i) {
-    //                 prob *= probs[i];
-    //             } else {
-    //                 prob *= 1.0 - probs[i];
-    //             }
-    //         });
-    //     prob
-    // }
 }
 
 #[inline]
 fn equation_lhs(hyperedge_index: usize, param: &[f64], cluster: &ClusterSolver) -> KahanSum<f64> {
     cluster.intersections_per_superset[&hyperedge_index]
         .iter()
-        .map(|(l, v)| {
-            let mut prob = 1.0;
-            for &s in &v[..*l] {
-                prob *= param[s];
-            }
-
-            for &ns in &v[*l..] {
-                prob *= 1.0 - param[ns];
-            }
-            prob
+        .map(|intersection| {
+            intersection.prob_within_cluster(param, None)
         })
         .kahan_sum()
 }
@@ -356,8 +388,10 @@ fn sum_squared_residuals(param: &[f64], cluster: &ClusterSolver) -> KahanSum<f64
         .zip(cluster.expectations.iter())
         .fold(KahanSum::new(), |acc, (i, &expect)| {
             let residual = equation_lhs(i, param, cluster) + (-expect);
-            acc + residual.sum() * residual.sum()
-            //((KahanSum::new_with_value(residual.err() * residual.err()) + 2.0 * residual.sum() * residual.err()) + residual.sum() * residual.sum()) + acc
+            // low accuracy: acc + residual.sum() * residual.sum()
+            // full accuracy: ((KahanSum::new_with_value(residual.err() * residual.err()) + 2.0 * residual.sum() * residual.err()) + residual.sum() * residual.sum()) + acc
+            // good enough:
+            (KahanSum::new_with_value(2.0 * residual.sum() * residual.err()) + residual.sum() * residual.sum()) + acc
         })
 }
 
@@ -417,31 +451,20 @@ fn analytical_gradient(param: &[f64], cluster: &ClusterSolver) -> Array1<f64> {
 
     for (hyperedge_index, &expect) in (0..cluster.hyperedges.len()).zip(&cluster.expectations) {
         let equation_diff = 2.0 * (equation_lhs(hyperedge_index, param, cluster) + (-expect)).sum();
-        for (l, v) in &cluster.intersections_per_superset[&hyperedge_index] {
-            for &s in &v[..*l] {
-                let mut prob = 1.0;
-                for &s in v[..*l].iter().filter(|&&i| i != s) {
-                    prob *= param[s];
-                }
+        for intersection in &cluster.intersections_per_superset[&hyperedge_index] {
 
-                for &ns in v[*l..].iter().filter(|&&i| i != s) {
-                    prob *= 1.0 - param[ns];
-                }
+            // In the next loops the gradient calculations change depending on what element is being skipped. 
+            // The probability is calculated in two halves, we can precompute each half assuming that no elements are skipped in it.
+            // In each iteration we know whether the item is included or no so we can pair each half of the probability calculation.
+            let noskip_included = intersection.prob_within_cluster_included(param, None) * equation_diff;
+            let noskip_nonincluded = intersection.prob_within_cluster_nonincluded(param, None) * equation_diff;
 
-                gradients[s] += prob * equation_diff;
+            for &s in intersection.included() {
+                gradients[s] += noskip_nonincluded * intersection.prob_within_cluster_included(param, Some(s));
             }
 
-            for &ns in &v[*l..] {
-                let mut prob = 1.0;
-                for &s in v[..*l].iter().filter(|&&i| i != ns) {
-                    prob *= param[s];
-                }
-
-                for &ns in v[*l..].iter().filter(|&&i| i != ns) {
-                    prob *= 1.0 - param[ns];
-                }
-
-                gradients[ns] += -prob * equation_diff;
+            for &ns in intersection.nonincluded() {
+                gradients[ns] += (-noskip_included) * intersection.prob_within_cluster_nonincluded(param, Some(ns));
             }
         }
     }
@@ -519,15 +542,13 @@ fn solve_cluster(
     let n_params = cluster.len();
     let init_param = Array1::from_elem(n_params, 1.0 / n_params as f64);
     let linesearch = MoreThuenteLineSearch::new();
-    // let linesearch = BacktrackingLineSearch::new(ArmijoCondition::new(0.0001f64).unwrap());
-    // let linesearch = HagerZhangLineSearch::new();
+
     // let beta_method = PolakRibiere::new();
-
-    let solver = LBFGS::new(linesearch, 3);
-
     // let solver = NonlinearConjugateGradient::new(linesearch, beta_method)
     //     .restart_iters(100)
     //     .restart_orthogonality(0.1);
+
+    let solver = LBFGS::new(linesearch, 15);
 
     // FINE TUNE OF THE SOLVER PARAMS IS NEEDED
     let res = Executor::new(problem, solver)
@@ -603,10 +624,10 @@ fn adjust_probabilities(
 fn powerset(hyperedge_indicies: &[usize]) -> Vec<Vec<usize>> {
     (1..=hyperedge_indicies.len())
         .flat_map(move |k| hyperedge_indicies.iter().cloned().combinations(k))
-        .map(|mut v| {
-            v.sort_unstable();
-            v
-        })
+        // .map(|mut v| {
+        //     v.sort_unstable();
+        //     v
+        // })
         .collect_vec()
 }
 
@@ -619,7 +640,7 @@ fn intersects(hyperedges: &[HyperEdge], target_index: usize) -> Vec<usize> {
         .enumerate()
         .filter(|(_, h)| h.iter().any(|&e| target.contains(&e)))
         .map(|(i, _h)| i)
-        .sorted_unstable()
+        // .sorted_unstable()
         .collect_vec()
 }
 
