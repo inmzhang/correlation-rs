@@ -1,16 +1,10 @@
 use std::collections::{HashMap, HashSet};
-use std::time::Instant;
 
 use argmin::core::{CostFunction, Error, Executor, Gradient};
-use argmin::solver::conjugategradient::beta::PolakRibiere;
-use argmin::solver::conjugategradient::NonlinearConjugateGradient;
-use argmin::solver::linesearch::condition::ArmijoCondition;
-use argmin::solver::linesearch::{
-    BacktrackingLineSearch, HagerZhangLineSearch, MoreThuenteLineSearch,
-};
+use argmin::solver::linesearch::MoreThuenteLineSearch;
 use argmin::solver::quasinewton::LBFGS;
 use itertools::Itertools;
-use kahan::{KahanSummator, KahanSum};
+use kahan::{KahanSum, KahanSummator};
 use nalgebra::{DMatrix, DVector};
 use ndarray::Array1;
 use rayon::prelude::*;
@@ -267,7 +261,8 @@ impl SplitIntersection {
         //         prob *= 1.0 - param[ns];
         //     }
         // }
-        self.prob_within_cluster_included(param, skip) * self.prob_within_cluster_nonincluded(param, skip)
+        self.prob_within_cluster_included(param, skip)
+            * self.prob_within_cluster_nonincluded(param, skip)
     }
 
     #[inline]
@@ -291,7 +286,6 @@ impl SplitIntersection {
         }
         prob
     }
-
 
     fn included(&self) -> &[usize] {
         &self.intersection[..self.start_of_nonincluded]
@@ -376,9 +370,7 @@ impl ClusterSolver {
 fn equation_lhs(hyperedge_index: usize, param: &[f64], cluster: &ClusterSolver) -> KahanSum<f64> {
     cluster.intersections_per_superset[&hyperedge_index]
         .iter()
-        .map(|intersection| {
-            intersection.prob_within_cluster(param, None)
-        })
+        .map(|intersection| intersection.prob_within_cluster(param, None))
         .kahan_sum()
 }
 
@@ -391,59 +383,11 @@ fn sum_squared_residuals(param: &[f64], cluster: &ClusterSolver) -> KahanSum<f64
             // low accuracy: acc + residual.sum() * residual.sum()
             // full accuracy: ((KahanSum::new_with_value(residual.err() * residual.err()) + 2.0 * residual.sum() * residual.err()) + residual.sum() * residual.sum()) + acc
             // good enough:
-            (KahanSum::new_with_value(2.0 * residual.sum() * residual.err()) + residual.sum() * residual.sum()) + acc
+            (KahanSum::new_with_value(2.0 * residual.sum() * residual.err())
+                + residual.sum() * residual.sum())
+                + acc
         })
 }
-
-// #[allow(dead_code)]
-// fn analytical_gradient(param: &[f64], cluster: &ClusterSolver) -> Array1<f64> {
-//     let mut gradients = vec![0.0; cluster.hyperedges.len()];
-//     for (hi, &expect) in (0..cluster.hyperedges.len()).zip(&cluster.expectations) {
-//         let intersection = &cluster.intersection[&hi];
-//         let equation_diff = 2.0 * (equation_lhs(&hi, param, cluster) + (-expect)).sum();
-//         for select in &cluster.supersets[&hi] {
-//             for &i in intersection.iter() {
-//                     let multiplier = if select.contains(&i) {
-//                         1.0
-//                     } else {
-//                         -1.0
-//                     };
-//                     gradients[i] += multiplier
-//                         * ClusterSolver::prob_within_cluster(select, intersection, param, Some(i))
-//                         * equation_diff;
-//             }
-//         }
-//     }
-//     Array1::from_vec(gradients)
-// }
-
-// #[allow(dead_code)]
-// fn analytical_gradient(param: &[f64], cluster: &ClusterSolver) -> Array1<f64> {
-//     let mut gradients = vec![0.0; cluster.hyperedges.len()];
-
-//         'outer: for (outer_index, &expect) in (0..cluster.hyperedges.len()).zip(&cluster.expectations) {
-//             let intersection = cluster.intersection[&outer_index].as_slice();
-//             let equation_diff = 2.0 * (equation_lhs(outer_index, param, cluster) + (-expect)).sum();
-
-//             debug_assert!(intersection.windows(2).all(|x| x[0] <= x[1]));
-//             for select in &cluster.supersets[&outer_index] {
-//                 for &i in intersection.iter() {
-
-//                         let multiplier = if select.contains(&i) {
-//                             1.0
-//                         } else {
-//                             -1.0
-//                         };
-//                         gradients[i] += multiplier
-//                             * ClusterSolver::prob_within_cluster(select, intersection, param, Some(i))
-//                             * equation_diff;
-//                 }
-//             }
-
-//         }
-
-//     Array1::from_vec(gradients)
-// }
 
 #[allow(dead_code)]
 fn analytical_gradient(param: &[f64], cluster: &ClusterSolver) -> Array1<f64> {
@@ -452,19 +396,22 @@ fn analytical_gradient(param: &[f64], cluster: &ClusterSolver) -> Array1<f64> {
     for (hyperedge_index, &expect) in (0..cluster.hyperedges.len()).zip(&cluster.expectations) {
         let equation_diff = 2.0 * (equation_lhs(hyperedge_index, param, cluster) + (-expect)).sum();
         for intersection in &cluster.intersections_per_superset[&hyperedge_index] {
-
-            // In the next loops the gradient calculations change depending on what element is being skipped. 
+            // In the next loops the gradient calculations change depending on what element is being skipped.
             // The probability is calculated in two halves, we can precompute each half assuming that no elements are skipped in it.
             // In each iteration we know whether the item is included or no so we can pair each half of the probability calculation.
-            let noskip_included = intersection.prob_within_cluster_included(param, None) * equation_diff;
-            let noskip_nonincluded = intersection.prob_within_cluster_nonincluded(param, None) * equation_diff;
+            let noskip_included =
+                intersection.prob_within_cluster_included(param, None) * equation_diff;
+            let noskip_nonincluded =
+                intersection.prob_within_cluster_nonincluded(param, None) * equation_diff;
 
             for &s in intersection.included() {
-                gradients[s] += noskip_nonincluded * intersection.prob_within_cluster_included(param, Some(s));
+                gradients[s] +=
+                    noskip_nonincluded * intersection.prob_within_cluster_included(param, Some(s));
             }
 
             for &ns in intersection.nonincluded() {
-                gradients[ns] += (-noskip_included) * intersection.prob_within_cluster_nonincluded(param, Some(ns));
+                gradients[ns] += (-noskip_included)
+                    * intersection.prob_within_cluster_nonincluded(param, Some(ns));
             }
         }
     }
@@ -624,10 +571,6 @@ fn adjust_probabilities(
 fn powerset(hyperedge_indicies: &[usize]) -> Vec<Vec<usize>> {
     (1..=hyperedge_indicies.len())
         .flat_map(move |k| hyperedge_indicies.iter().cloned().combinations(k))
-        // .map(|mut v| {
-        //     v.sort_unstable();
-        //     v
-        // })
         .collect_vec()
 }
 
@@ -640,7 +583,6 @@ fn intersects(hyperedges: &[HyperEdge], target_index: usize) -> Vec<usize> {
         .enumerate()
         .filter(|(_, h)| h.iter().any(|&e| target.contains(&e)))
         .map(|(i, _h)| i)
-        // .sorted_unstable()
         .collect_vec()
 }
 
