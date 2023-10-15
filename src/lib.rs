@@ -118,13 +118,28 @@ pub fn cal_high_order_correlations(
     let (extended_hyperedges, clusters) = cluster_hyperedges(&all_hyperedges);
     // calculate the expectations of each hyperedge
     let expectations = calculate_expectations(detection_events, &extended_hyperedges);
+    // precomputed intersections per superset
+    let precomputed_intersections = clusters
+        .iter()
+        .map(|c| (c.len() as f32 + 1.0).log2() as usize)
+        .unique()
+        .map(|s| (s, precompute_intersections_per_superset(s)))
+        .collect::<HashMap<_, _>>();
     // thread pool to use
     let pool = create_thread_pool(num_threads.unwrap_or(num_cpus::get()));
     // solve each cluster in parallel
     let solved_probs = pool.install(|| {
         clusters
             .par_iter()
-            .map(|cluster| solve_cluster(cluster, &extended_hyperedges, &expectations, max_iters))
+            .map(|cluster| {
+                solve_cluster(
+                    cluster,
+                    &extended_hyperedges,
+                    &expectations,
+                    max_iters,
+                    &precomputed_intersections,
+                )
+            })
             .collect::<Result<Vec<_>, Error>>()
     })?;
     // adjust probabilities
@@ -228,7 +243,71 @@ fn calculate_expectations(
     expectations
 }
 
-struct ClusterSolver {
+type IntersectionsMap = HashMap<usize, Vec<SplitIntersection>>;
+
+fn precompute_intersections_per_superset(size: usize) -> IntersectionsMap {
+    let root = HyperEdge::from_iter(0..size);
+    let hyperedges = powerset(&root)
+        .into_iter()
+        .map(HyperEdge::from_iter)
+        .collect_vec();
+    let mut intersections = HashMap::with_capacity(hyperedges.len());
+    let mut supersets = HashMap::with_capacity(hyperedges.len());
+    for (index, hyperedge) in hyperedges.iter().enumerate() {
+        let intersect = intersects(&hyperedges, index);
+        let superset = powerset(&intersect)
+            .into_iter()
+            .filter(|set| {
+                let sym_diff = symmetric_difference(set, &hyperedges).collect_vec();
+                hyperedge.iter().all(|i| sym_diff.contains(i))
+            })
+            .collect_vec();
+        intersections.insert(index, intersect);
+        supersets.insert(index, superset);
+    }
+
+    let mut intersections_per_superset = HashMap::new();
+
+    for index in 0..hyperedges.len() {
+        let intersection = &intersections[&index];
+        let superset = &supersets[&index];
+
+        let data = superset
+            .iter()
+            .map(|select| {
+                // First list all intersection Hyperedges that are part of this superset
+                let mut v = intersection
+                    .iter()
+                    .cloned()
+                    .filter(|i| select.contains(i))
+                    .collect_vec();
+
+                // Record the location of the changeover
+                let start_of_nonincluded = v.len();
+
+                // Second list all intersection Hyperedges that are NOT part of this superset
+                v.extend(
+                    intersection
+                        .iter()
+                        .cloned()
+                        .filter(|i| !select.contains(i))
+                        .collect_vec(),
+                );
+
+                SplitIntersection {
+                    intersection: v,
+                    start_of_nonincluded,
+                }
+            })
+            .collect_vec();
+
+        intersections_per_superset.insert(index, data);
+    }
+
+    intersections_per_superset
+}
+
+struct ClusterSolver<'a> {
     hyperedges: Vec<HyperEdge>,
     expectations: Vec<f64>,
 
@@ -238,7 +317,7 @@ struct ClusterSolver {
     /// For a given HyperEdge index, we store the intersection list in two parts, with the start of the second half marked with the usize in the tuple.
     /// The first part contains the indicies of intersection hyperedges that where also part of the superset, the second half contains those that where not part of it.
     /// Doing this during problem setup allows to avoid many "contains" search loops during iterations.
-    intersections_per_superset: HashMap<usize, Vec<SplitIntersection>>,
+    intersections_per_superset: &'a IntersectionsMap,
 }
 
 struct SplitIntersection {
@@ -296,71 +375,23 @@ impl SplitIntersection {
     }
 }
 
-impl ClusterSolver {
-    fn new(cluster: &Cluster, all_hyperedges: &[HyperEdge], expectations: &[f64]) -> Self {
+impl<'a> ClusterSolver<'a> {
+    fn new(
+        cluster: &Cluster,
+        all_hyperedges: &[HyperEdge],
+        expectations: &[f64],
+        precomputed_intersections: &'a HashMap<usize, IntersectionsMap>,
+    ) -> Self {
         let hyperedges = cluster
             .iter()
             .map(|&i| all_hyperedges[i].clone())
             .collect_vec();
         let expectations = cluster.iter().map(|&i| expectations[i]).collect_vec();
-
-        let mut intersections = HashMap::with_capacity(hyperedges.len());
-        let mut supersets = HashMap::with_capacity(hyperedges.len());
-        for (index, hyperedge) in hyperedges.iter().enumerate() {
-            let intersect = intersects(&hyperedges, index);
-            let superset = powerset(&intersect)
-                .into_iter()
-                .filter(|set| {
-                    let sym_diff = symmetric_difference(set, &hyperedges).collect_vec();
-                    hyperedge.iter().all(|i| sym_diff.contains(i))
-                })
-                .collect_vec();
-            intersections.insert(index, intersect);
-            supersets.insert(index, superset);
-        }
-
-        let mut intersections_per_superset = HashMap::new();
-
-        for index in 0..hyperedges.len() {
-            let intersection = &intersections[&index];
-            let superset = &supersets[&index];
-
-            let data = superset
-                .iter()
-                .map(|select| {
-                    // First list all intersection Hyperedges that are part of this superset
-                    let mut v = intersection
-                        .iter()
-                        .cloned()
-                        .filter(|i| select.contains(i))
-                        .collect_vec();
-
-                    // Record the location of the changeover
-                    let start_of_nonincluded = v.len();
-
-                    // Second list all intersection Hyperedges that are NOT part of this superset
-                    v.extend(
-                        intersection
-                            .iter()
-                            .cloned()
-                            .filter(|i| !select.contains(i))
-                            .collect_vec(),
-                    );
-
-                    SplitIntersection {
-                        intersection: v,
-                        start_of_nonincluded,
-                    }
-                })
-                .collect_vec();
-
-            intersections_per_superset.insert(index, data);
-        }
-
+        let size = all_hyperedges[*cluster.last().unwrap()].len();
+        let intersections_per_superset = precomputed_intersections.get(&size).unwrap();
         Self {
             hyperedges,
             expectations,
-
             intersections_per_superset,
         }
     }
@@ -442,7 +473,7 @@ fn analytical_gradient_relative_error(
     (expected_change - actual_change).abs() / expected_change.max(actual_change)
 }
 
-impl CostFunction for ClusterSolver {
+impl CostFunction for ClusterSolver<'_> {
     type Param = Array1<f64>;
     type Output = f64;
 
@@ -460,7 +491,7 @@ impl CostFunction for ClusterSolver {
     }
 }
 
-impl Gradient for ClusterSolver {
+impl Gradient for ClusterSolver<'_> {
     type Param = Array1<f64>;
     type Gradient = Array1<f64>;
     fn gradient(&self, param: &Self::Param) -> Result<Self::Gradient, Error> {
@@ -484,8 +515,14 @@ fn solve_cluster(
     all_hyperedges: &[HyperEdge],
     expectations: &[f64],
     max_iters: Option<u64>,
+    precomputed_intersections: &HashMap<usize, IntersectionsMap>,
 ) -> Result<Vec<f64>, Error> {
-    let problem = ClusterSolver::new(cluster, all_hyperedges, expectations);
+    let problem = ClusterSolver::new(
+        cluster,
+        all_hyperedges,
+        expectations,
+        precomputed_intersections,
+    );
     let n_params = cluster.len();
     let init_param = Array1::from_elem(n_params, 1.0 / n_params as f64);
     let linesearch = MoreThuenteLineSearch::new();
