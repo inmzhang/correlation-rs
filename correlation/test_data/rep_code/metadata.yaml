@@ -1,0 +1,5 @@
+code: repetition_code:memory
+distance: 5
+num_detectors: 24
+num_shots: 1000
+rounds: 5
