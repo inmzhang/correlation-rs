@@ -194,7 +194,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "correlation-rs"
+name = "correlation-py"
 version = "0.1.0"
 dependencies = [
  "correlation",

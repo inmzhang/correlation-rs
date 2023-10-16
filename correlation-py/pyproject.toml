@@ -4,7 +4,6 @@ build-backend = "maturin"
 
 [project]
 name = "correlation_py"
-version = "0.1.0"
 authors = [{ "name" = "Yiming Zhang" }]
 description = "High order correlation analysis of error models."
 readme = "README.md"
@@ -19,8 +18,11 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest", "ruff"]
+dev = ["maturin", "pytest", "ruff"]
 
 [tool.ruff]
 line-length = 120
 exclude = ["__init__.py"]
+
+[tool.maturin]
+module-name = "correlation_py._internal"

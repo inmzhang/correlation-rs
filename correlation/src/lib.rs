@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use argmin::core::{CostFunction, Error, Executor, Gradient};
 use argmin::solver::linesearch::MoreThuenteLineSearch;
@@ -76,7 +76,7 @@ type Cluster = Vec<usize>;
 ///
 /// * `detection_events` - A matrix of detection events with shape (num_shots, num_detectors).
 ///
-/// * `hyperedges` - A list of hyperedges. Each hyperedge is a set of detectors.
+/// * `hyperedges` - A list of hyperedges. Each hyperedge is a list of detectors.
 ///
 /// * `num_threads` - Number of threads to use in parallel, default to number of cpus.
 ///
@@ -87,7 +87,7 @@ type Cluster = Vec<usize>;
 /// A map from hyperedges to their correlation probabilities.
 pub fn cal_high_order_correlations(
     detection_events: &Array2<f64>,
-    hyperedges: Option<&[HashSet<usize>]>,
+    hyperedges: Option<&[Vec<usize>]>,
     num_threads: Option<usize>,
     max_iters: Option<u64>,
 ) -> Result<HashMap<HyperEdge, f64>, Error> {
@@ -130,7 +130,7 @@ pub fn cal_high_order_correlations(
 
 fn all_hyperedges_considered(
     num_detectors: usize,
-    hyperedges: Option<&[HashSet<usize>]>,
+    hyperedges: Option<&[Vec<usize>]>,
 ) -> Vec<HyperEdge> {
     let mut all_hyperedges: Vec<HyperEdge> = (0..num_detectors)
         .map(|e| HyperEdge::from_iter(std::iter::once(e)))
@@ -628,6 +628,7 @@ fn symmetric_difference(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
     #[test]
     fn test_symmetric_difference1() {

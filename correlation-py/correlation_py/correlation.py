@@ -2,7 +2,7 @@ from typing import Iterable, Optional
 
 import numpy as np
 
-from correlation_rs import cal_2nd_order_correlation_rs, cal_high_order_correlations_rs
+from ._internal import cal_2nd_order_correlation_rs, cal_high_order_correlations_rs
 from correlation_py.result import CorrelationResult
 from correlation_py.utils import HyperEdge
 
@@ -41,8 +41,8 @@ def cal_high_order_correlations(
         The correlation result.
     """
     detection_events = detection_events.astype(np.float64)
-    hyperedges = hyperedges and list(hyperedges)
+    hyperedges_pass = hyperedges and [list(t) for t in hyperedges]
     results = cal_high_order_correlations_rs(
-        detection_events, hyperedges, num_threads, max_iters
+        detection_events, hyperedges_pass, num_threads, max_iters
     )
     return CorrelationResult({res[0]: res[1] for res in results})
