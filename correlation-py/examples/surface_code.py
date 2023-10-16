@@ -1,5 +1,3 @@
-
-
 import stim
 
 from correlation_py import (
@@ -28,7 +26,7 @@ def main():
     bdy, edges = res.data
     print(bdy)
     print(edges)
-    
+
     result = cal_high_order_correlations(dets, graph.hyperedges)
     for k, v in graph.hyperedge_probs.items():
         print(f"Hyperedge: {k}, ideal: {v}, result: {result.get(k)}")
