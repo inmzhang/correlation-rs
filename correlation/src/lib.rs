@@ -211,12 +211,16 @@ fn calculate_expectations(
                 }),
         );
     // calculate the rest of the expectations
+    // use a matrix with new data layout to reduce row-wise operation overhead
+    let detection_events = Array2::from_shape_fn((num_detectors, num_shots), |(i, j)| {
+        detection_events[[j, i]]
+    });
     for hyperedge in extended_hyperedges.iter().skip(n_low_order) {
         expectations.push(
             hyperedge
                 .iter()
-                .fold(Array1::<f64>::ones(num_shots), |acc, &det| {
-                    acc * &detection_events.column(det)
+                .fold(Array1::from_elem(num_shots, 1.0), |acc, &det| {
+                    acc * &detection_events.row(det)
                 })
                 .mean()
                 .unwrap(),
