@@ -1,0 +1,26 @@
+[build-system]
+requires = ["maturin>=1,<2"]
+build-backend = "maturin"
+
+[project]
+name = "correlation_py"
+version = "0.1.0"
+authors = [{ "name" = "Yiming Zhang" }]
+description = "High order correlation analysis of error models."
+readme = "README.md"
+requires-python = ">=3.7"
+
+dependencies = ["numpy", "stim"]
+
+classifiers = [
+  "Programming Language :: Rust",
+  "Programming Language :: Python :: Implementation :: CPython",
+  "Programming Language :: Python :: Implementation :: PyPy",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "ruff"]
+
+[tool.ruff]
+line-length = 120
+exclude = ["__init__.py"]
