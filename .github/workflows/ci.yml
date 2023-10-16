@@ -1,0 +1,116 @@
+name: build
+
+on: 
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+
+  macos:
+    runs-on: "macos-latest"
+    strategy:
+      matrix:
+        target: [x86_64, aarch64]
+    steps:
+      - uses: actions/checkout@v3
+      - name: Install latests stable Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+      - uses: actions/setup-python@v4
+        with:
+          python-version: |
+            3.7
+            3.8
+            3.9
+            3.10
+            3.11
+      - name: Build Wheels with maturin
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          command: build
+          args: --release --out dist --manifest-path correlation-py/Cargo.toml
+      - name: Install wheel
+        run: pip install correlation_py --no-index --find-links dist --no-deps --force-reinstall
+      - name: Save Artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: wheels
+          path: dist
+  
+  windows:
+    runs-on: "windows-latest"
+    strategy:
+      matrix:
+        pyversion: ["3.8", "3.9", "3.10", "3.11"]
+    steps:
+      - uses: actions/checkout@v3
+      - name: Install latests stable Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+      - uses: actions/setup-python@v4
+        with:
+          python-version: ${{ matrix.pyversion }}
+          architecture: x64
+      - name: Build Wheels with maturin
+        uses: PyO3/maturin-action@v1
+        with:
+          target: x86_64
+          command: build
+          args: --release --out dist --manifest-path correlation-py/Cargo.toml
+      - name: Install wheel
+        run: pip install correlation_py --no-index --find-links dist --no-deps --force-reinstall
+      - name: Save Artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: wheels
+          path: dist
+
+  linux:
+    runs-on: "ubuntu-latest"
+    strategy:
+      matrix:
+        pyversion: ["3.8", "3.9", "3.10", "3.11"]
+    steps:
+      - uses: actions/checkout@v3
+      - name: Install latests stable Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+      - uses: actions/setup-python@v4
+        with:
+          python-version: ${{ matrix.pyversion }}
+          architecture: x64
+      - name: Build Wheels with maturin
+        uses: PyO3/maturin-action@v1
+        with:
+          target: x86_64
+          manylinux: auto
+          command: build
+          args: --release --interpreter python${{ matrix.pyversion }} --out dist --manifest-path correlation-py/Cargo.toml
+      - name: Install wheel
+        run: pip install correlation_py --no-index --find-links dist --no-deps --force-reinstall
+      - name: Save Artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: wheels
+          path: dist
+  
+  sdist:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist --manifest-path correlation-py/Cargo.toml
+      - name: Upload sdist
+        uses: actions/upload-artifact@v3
+        with:
+          name: wheels
+          path: dist
