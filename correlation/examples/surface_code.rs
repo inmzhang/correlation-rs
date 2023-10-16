@@ -3,12 +3,11 @@ use correlation::{
 };
 use itertools::Itertools;
 use smallvec::smallvec;
-use std::collections::HashSet;
 use std::time::Instant;
 
 #[derive(serde::Deserialize)]
 struct HyperedgeSetup {
-    hyperedges: Vec<HashSet<usize>>,
+    hyperedges: Vec<Vec<usize>>,
     probability: Vec<f64>,
 }
 
@@ -62,9 +61,13 @@ fn run() {
     let file = std::fs::File::open("correlation/test_data/surface_code/hyperedges.json").unwrap();
     let hyperedges_setup: HyperedgeSetup = serde_json::from_reader(file).unwrap();
     let start = Instant::now();
-    let res =
-        cal_high_order_correlations(&dets, Some(&hyperedges_setup.hyperedges), Some(16), None)
-            .unwrap();
+    let res = cal_high_order_correlations(
+        &dets,
+        Some(hyperedges_setup.hyperedges.as_slice()),
+        Some(16),
+        None,
+    )
+    .unwrap();
     println!(
         "Numerical time with hyperedges: {:?}s",
         start.elapsed().as_secs()
