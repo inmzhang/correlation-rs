@@ -12,11 +12,14 @@ rayon = "1.7.0"
 argmin = { version = "0.8.1" }
 argmin-math = { version = "0.3.0", features = ["ndarray_latest-serde"] }
 ndarray = { version = "0.15", features = ["serde-1"] }
-ndarray-linalg = { version = "0.16", features = ["intel-mkl-static"] }
 cfg-if = "1.0.0"
 num_cpus = "1.15.0"
 kahan = "0.1.4"
 finitediff = { version = "0.1.4", features = ["ndarray"], optional = true }
+# [target.'cfg(target_arch = "x86_64")'.dependencies]
+ndarray-linalg = { version = "0.16", features = ["intel-mkl-static"] }
+# [target.'cfg(target_arch = "aarch64")'.dependencies]
+# ndarray-linalg = { version = "0.16", features = ["openblas-static"] }
 
 [dev-dependencies]
 serde = "1.0"
