@@ -110,6 +110,7 @@ pub fn cal_high_order_correlations(
     let solved_probs = pool.install(|| {
         clusters
             .par_iter()
+            .with_max_len(1)
             .map(|cluster| {
                 solve_cluster(
                     cluster,
