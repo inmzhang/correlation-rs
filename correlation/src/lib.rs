@@ -133,21 +133,21 @@ fn all_hyperedges_considered(
     num_detectors: usize,
     hyperedges: Option<&[Vec<usize>]>,
 ) -> Vec<HyperEdge> {
-    let mut all_hyperedges: Vec<HyperEdge> = (0..num_detectors)
-        .map(|e| HyperEdge::from_iter(std::iter::once(e)))
-        .collect_vec();
-    all_hyperedges.extend(
-        (0..num_detectors)
-            .combinations(2)
-            .map(|e| e.into_iter().collect()),
-    );
+    let mut all_hyperedges: Vec<HyperEdge> = Vec::new();
     if let Some(hyperedges) = hyperedges {
         all_hyperedges.extend(hyperedges.iter().map(|e| {
             let mut hyperedge = HyperEdge::from_iter(e.clone());
             hyperedge.sort();
             hyperedge
         }));
-    };
+    } else {
+        all_hyperedges.extend((0..num_detectors).map(|e| HyperEdge::from_iter(std::iter::once(e))));
+        all_hyperedges.extend(
+            (0..num_detectors)
+                .combinations(2)
+                .map(|e| e.into_iter().collect()),
+        );
+    }
     all_hyperedges.sort_by_key(|h| h.len());
     all_hyperedges
 }
@@ -194,7 +194,6 @@ fn calculate_expectations(
     let shape = detection_events.shape();
     let num_shots = shape[0];
     let num_detectors = shape[1];
-    let n_low_order = (num_detectors * (num_detectors + 1)) / 2;
     // pre-calculate 2-point expectations using
     // matrix multiply to reduce overhead
     let expect_ixj = cal_two_points_expects(detection_events);
@@ -202,12 +201,12 @@ fn calculate_expectations(
         Vec::from_iter(
             extended_hyperedges
                 .iter()
-                .take(n_low_order)
+                .take_while(|e| e.len() <= 2)
                 .map(|e| match e.len() {
                     1 => expect_ixj[(e[0], e[0])],
                     2 => expect_ixj[(e[0], e[1])],
                     _ => {
-                        unreachable!("First (n+1)n/2 elements must be 1- and 2-point expectations")
+                        unreachable!("unreachable!")
                     }
                 }),
         );
@@ -216,12 +215,12 @@ fn calculate_expectations(
     let detection_events = Array2::from_shape_fn((num_detectors, num_shots), |(i, j)| {
         detection_events[[j, i]]
     });
-    for hyperedge in extended_hyperedges.iter().skip(n_low_order) {
+    for hyperedge in extended_hyperedges.iter().skip_while(|e| e.len() <= 2) {
         expectations.push(
             hyperedge
                 .iter()
                 .fold(Array1::from_elem(num_shots, 1.0), |acc, &det| {
-                    acc * &detection_events.row(det)
+                    acc * detection_events.row(det)
                 })
                 .mean()
                 .unwrap(),
@@ -567,9 +566,14 @@ fn adjust_probabilities(
                 let adjusted_prob = adjusted_probs
                     .iter()
                     .filter_map(|(h, &p)| {
-                        if cluster.iter().any(|&i| &all_hyperedges[i] == h)
-                            || hyperedge.iter().any(|i| !h.contains(i))
-                        {
+                        if hyperedge.iter().any(|i| !h.contains(i)) {
+                            return None;
+                        }
+                        let i = *cluster.last().unwrap();
+                        let max_h = &all_hyperedges[i];
+                        assert!(hyperedge.iter().all(|e| max_h.contains(e)));
+                        let num_intersect = max_h.iter().filter(|&e| h.contains(e)).count();
+                        if num_intersect != weight_to_adjust {
                             return None;
                         }
                         Some(p)

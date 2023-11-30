@@ -8,7 +8,9 @@ from correlation_py.utils import HyperEdge
 
 
 def cal_2nd_order_correlations(detection_events: np.ndarray) -> CorrelationResult:
-    """Calculate the 2nd order correlation analytically.
+    """Calculate the 2nd order correlation analytically. 
+
+    All the one-body and two-body correlation will be calculated.
 
     Args:
         detection_events: The detection events.
@@ -31,11 +33,12 @@ def cal_high_order_correlations(
 
     Args:
         detection_events: The detection events.
-        hyperedges: The hyperedges to take into account, excluding the 1st and 2nd
-            order edges.
+        hyperedges: All the hyperedges to take into account, including the 1st and 2nd
+            order edges. If None, all the one-body and two-body correlation will be
+            calculated.
         num_threads: The number of threads to use during solving hyperedge clusters.
         max_iters: The maximum number of iterations to use during solving hyperedge
-            clusters.
+            clusters. Default to 20 * n_params
 
     Returns:
         The correlation result.

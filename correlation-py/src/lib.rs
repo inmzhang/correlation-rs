@@ -23,7 +23,7 @@ fn cal_high_order_correlations_rs<'py>(
     let detection_events = detection_events.as_array().to_owned();
     let results = cal_high_order_correlations(
         &detection_events,
-        hyperedges.as_ref().map(|x| x.as_slice()),
+        hyperedges.as_deref(),
         num_threads,
         max_iters,
     )
