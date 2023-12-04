@@ -1,12 +1,16 @@
 """Utility functions for correlation analysis."""
 import functools
-from typing import FrozenSet, List, Dict, Tuple
+import io
+from typing import FrozenSet, List, Dict, Tuple, Union
+import pathlib
 
 import numpy as np
 import stim
 
 
 HyperEdge = FrozenSet[int]
+Frames = FrozenSet[int]
+Decomposition = Tuple[HyperEdge, Frames]
 
 
 class TannerGraph:
@@ -27,11 +31,47 @@ class TannerGraph:
         self._dem = dem.flattened()
 
         self._hyperedges: List[HyperEdge] = []
-        self._hyperedge_frames: Dict[HyperEdge, FrozenSet[int]] = {}
+        self._hyperedge_frames: Dict[HyperEdge, Frames] = {}
         self._hyperedge_probs: Dict[HyperEdge, float] = {}
-        self._stim_decompose: Dict[HyperEdge, List[HyperEdge]] = {}
+        self._stim_decompose: Dict[HyperEdge, List[Decomposition]] = {}
         self._process_dem()
         self._tanner_matrix = self._gen_tanner_matrix()
+
+    def with_probs(self, probabilities: Dict[HyperEdge, float]) -> "TannerGraph":
+        """Create a new tanner graph with the given probabilities.
+
+        Args:
+            probabilities: The new probabilities of the hyperedges.
+
+        Returns:
+            A new tanner graph with the given probabilities.
+        """
+        new_tanner_graph = TannerGraph(self._dem)
+        new_tanner_graph._hyperedge_probs = probabilities
+        return new_tanner_graph
+    
+    @classmethod
+    def from_detector_error_model_file(
+        cls,
+        path: Union[str, pathlib.Path],
+    ) -> "TannerGraph":
+        """Create a tanner graph from a detector error model file."""
+        dem = stim.DetectorErrorModel.from_file(path)
+        return TannerGraph(dem)
+
+    def to_detetor_error_model(self) -> stim.DetectorErrorModel:
+        """Convert the tanner graph to a detector error model."""
+        dem_str = io.StringIO()
+        for hyperedge, decompose in self.stim_decompose.items():
+            frames = self.hyperedge_frames[hyperedge]
+            prob = self.hyperedge_probs[hyperedge]
+            dem_str.write(f"error({prob}) ")
+            for i, (dets, frames) in enumerate(decompose):
+                dem_str.write(" ".join([f"D{i}" for i in dets] + [f"L{i}" for i in frames]))
+                if i != len(decompose) - 1:
+                    dem_str.write(" ^ ")
+            dem_str.write("\n")
+        return stim.DetectorErrorModel(dem_str.getvalue())
 
     @property
     def hyperedges(self) -> List[HyperEdge]:
@@ -39,7 +79,7 @@ class TannerGraph:
         return self._hyperedges
 
     @property
-    def hyperedge_frames(self) -> Dict[HyperEdge, FrozenSet[int]]:
+    def hyperedge_frames(self) -> Dict[HyperEdge, Frames]:
         """The frames of all hyperedges."""
         return self._hyperedge_frames
 
@@ -49,7 +89,7 @@ class TannerGraph:
         return self._hyperedge_probs
 
     @property
-    def stim_decompose(self) -> Dict[HyperEdge, List[HyperEdge]]:
+    def stim_decompose(self) -> Dict[HyperEdge, List[Decomposition]]:
         """The stim suggested decomposition of all hyperedges."""
         return self._stim_decompose
 
@@ -120,7 +160,7 @@ class TannerGraph:
             self._hyperedge_probs[dets] = prob
             self._hyperedge_frames[dets] = frame
             self._stim_decompose[dets] = [
-                frozenset(dets) for dets, frame in zip(dets_track, frames_track)
+                (frozenset(dets), frozenset(frame)) for dets, frame in zip(dets_track, frames_track)
             ]
         else:
             prob_prev = self._hyperedge_probs[dets]
