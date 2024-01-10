@@ -34,6 +34,7 @@ class TannerGraph:
         self._hyperedge_frames: Dict[HyperEdge, Frames] = {}
         self._hyperedge_probs: Dict[HyperEdge, float] = {}
         self._stim_decompose: Dict[HyperEdge, List[Decomposition]] = {}
+        self._detector_coords: Dict[int, List[float]] = {}
         self._process_dem()
         self._tanner_matrix = self._gen_tanner_matrix()
 
@@ -71,6 +72,10 @@ class TannerGraph:
                 if i != len(decompose) - 1:
                     dem_str.write(" ^ ")
             dem_str.write("\n")
+        for det, coords in self._detector_coords.items():
+            dem_str.write("detector(")
+            dem_str.write(", ".join([str(i) for i in coords]))
+            dem_str.write(f") D{det}\n")
         return stim.DetectorErrorModel(dem_str.getvalue())
 
     @property
@@ -108,6 +113,11 @@ class TannerGraph:
         """The number of detectors."""
         return self._dem.num_detectors
 
+    @property
+    def detector_coords(self) -> Dict[int, List[float]]:
+        """The coordinates of the detectors."""
+        return self._detector_coords
+
     def _gen_tanner_matrix(self) -> np.ndarray:
         """Generate the tanner matrix from the hyperedges."""
         tanner_matrix = np.zeros((self.num_dets, self.num_hyperedges), dtype=np.bool_)
@@ -123,7 +133,11 @@ class TannerGraph:
                 if instruction.type == "error":
                     self._process_error(instruction)
                 elif instruction.type == "detector":
-                    pass
+                    targets = instruction.targets_copy()
+                    assert len(targets) == 1
+                    target = targets[0]
+                    assert target.is_relative_detector_id()
+                    self._detector_coords[target.val] = instruction.args_copy()
                 else:
                     raise NotImplementedError()
             else:
