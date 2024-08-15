@@ -7,37 +7,6 @@ on:
     branches: [master]
 
 jobs:
-
-  macos:
-    runs-on: "macos-latest"
-    strategy:
-      matrix:
-        pyversion: ["3.8", "3.9", "3.10", "3.11"]
-        target: [x86_64]
-    steps:
-      - uses: actions/checkout@v3
-      - name: Install latests stable Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: stable
-      - uses: actions/setup-python@v4
-        with:
-          python-version: ${{ matrix.pyversion }}
-          architecture: x64
-      - name: Build Wheels with maturin
-        uses: PyO3/maturin-action@v1
-        with:
-          target: ${{ matrix.target }}
-          command: build
-          args: --release --out dist --manifest-path correlation-py/Cargo.toml
-      - name: Install wheel
-        run: pip install correlation_py --no-index --find-links dist --no-deps --force-reinstall
-      - name: Save Artifacts
-        uses: actions/upload-artifact@v3
-        with:
-          name: wheels
-          path: dist
-  
   windows:
     runs-on: "windows-latest"
     strategy:
@@ -113,7 +82,7 @@ jobs:
           path: dist/*.tar.gz
 
   upload_pypi:
-    needs: [macos, windows, linux, sdist]
+    needs: [windows, linux, sdist]
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
