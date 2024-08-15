@@ -36,7 +36,7 @@ jobs:
       - name: Save Artifacts
         uses: actions/upload-artifact@v3
         with:
-          name: wheels
+          name: dists
           path: dist
 
   linux:
@@ -66,7 +66,7 @@ jobs:
       - name: Save Artifacts
         uses: actions/upload-artifact@v3
         with:
-          name: wheels
+          name: dists
           path: dist
   
   sdist:
