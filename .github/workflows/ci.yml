@@ -109,5 +109,20 @@ jobs:
       - name: Upload sdist
         uses: actions/upload-artifact@v3
         with:
-          name: wheels
-          path: dist
+          name: dists
+          path: dist/*.tar.gz
+
+  upload_pypi:
+    needs: [macos, windows, linux, sdist]
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/download-artifact@v3
+        with:
+          name: dists
+          path: dist/
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
