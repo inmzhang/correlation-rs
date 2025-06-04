@@ -20,7 +20,7 @@ mod io;
 /// * `detection_events` - A matrix of detection events with shape (num_shots, num_detectors).
 ///
 /// * `detector_mask` - Boolean mask to mask certain detectors out. If the i-th element is true,
-/// the i-th detector is masked out.
+///   the i-th detector is masked out.
 ///
 /// # Returns
 ///
@@ -198,18 +198,15 @@ fn calculate_expectations(
     // matrix multiply to reduce overhead
     let expect_ixj = cal_two_points_expects(detection_events);
     let mut expectations =
-        Vec::from_iter(
-            extended_hyperedges
-                .iter()
-                .take_while(|e| e.len() <= 2)
-                .map(|e| match e.len() {
-                    1 => expect_ixj[(e[0], e[0])],
-                    2 => expect_ixj[(e[0], e[1])],
-                    _ => {
-                        unreachable!("unreachable!")
-                    }
-                }),
-        );
+        Vec::from_iter(extended_hyperedges.iter().take_while(|e| e.len() <= 2).map(
+            |e| match e.len() {
+                1 => expect_ixj[(e[0], e[0])],
+                2 => expect_ixj[(e[0], e[1])],
+                _ => {
+                    unreachable!("unreachable!")
+                }
+            },
+        ));
     // calculate the rest of the expectations
     // use a matrix with new data layout to reduce row-wise operation overhead
     let detection_events = Array2::from_shape_fn((num_detectors, num_shots), |(i, j)| {
@@ -510,7 +507,8 @@ fn solve_cluster(
         precomputed_intersections,
     );
     let n_params = cluster.len();
-    let init_param = Array1::from_elem(n_params, 1.0 / n_params as f64);
+    let init_param: Array1<f64> = Array1::from_elem(n_params, 1.0 / n_params as f64);
+
     let linesearch = MoreThuenteLineSearch::new();
 
     // let beta_method = PolakRibiere::new();

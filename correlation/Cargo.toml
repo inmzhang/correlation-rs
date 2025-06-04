@@ -6,20 +6,19 @@ edition = "2021"
 [dependencies]
 anyhow = "1.0.71"
 bitvec = "1.0.1"
-itertools = "0.13"
+itertools = "0.14"
 smallvec = "1.10.0"
 rayon = "1.7.0"
-argmin = { version = "0.8.1" }
-argmin-math = { version = "0.3.0", features = ["ndarray_latest-serde"] }
-ndarray = { version = "0.15", features = ["serde-1"] }
+argmin = { git = "https://github.com/argmin-rs/argmin" }
+argmin-math = { git = "https://github.com/argmin-rs/argmin", features = ["ndarray_latest-nolinalg"] }
+ndarray = { version = "0.16.1", features = ["serde-1"] }
 cfg-if = "1.0.0"
 num_cpus = "1.15.0"
 kahan = "0.1.4"
 finitediff = { version = "0.1.4", features = ["ndarray"], optional = true }
-ndarray-linalg = { version = "0.16", features = ["intel-mkl-static"] }
 
 [dev-dependencies]
-serde = "1.0"
+serde = {version="1.0", features=["derive"]}
 serde_yaml = "0.9.21"
 serde_json = "1.0.96"
 

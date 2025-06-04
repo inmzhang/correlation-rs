@@ -6,7 +6,7 @@ use pyo3::{exceptions::PyRuntimeError, prelude::*, types::PyFrozenSet};
 fn cal_2nd_order_correlation_rs<'py>(
     py: Python<'py>,
     detection_events: PyReadonlyArray2<'py, f64>,
-) -> PyResult<(&'py PyArray1<f64>, &'py PyArray2<f64>)> {
+) -> PyResult<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray2<f64>>)> {
     let detection_events = detection_events.as_array().to_owned();
     let (boundaries, edges) = cal_2nd_order_correlation(&detection_events);
     Ok((boundaries.into_pyarray(py), edges.into_pyarray(py)))
@@ -42,7 +42,7 @@ fn cal_high_order_correlations_rs<'py>(
 }
 
 #[pymodule]
-fn _internal(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
+fn _internal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_wrapped(wrap_pyfunction!(cal_2nd_order_correlation_rs))?;
     m.add_wrapped(wrap_pyfunction!(cal_high_order_correlations_rs))?;
     Ok(())

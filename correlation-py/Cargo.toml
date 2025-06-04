@@ -10,6 +10,6 @@ name = "correlation_py"
 crate-type = ["cdylib"]
 
 [dependencies]
-pyo3 = { version = "0.21", features = ["extension-module"] }
-numpy = "0.21"
+pyo3 = { version = "0.25", features = ["extension-module"] }
+numpy = "0.25"
 correlation = { path = "../correlation" }
