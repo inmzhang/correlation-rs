@@ -34,7 +34,7 @@ jobs:
       - name: Install wheel
         run: pip install correlation_py --no-index --find-links dist --no-deps --force-reinstall
       - name: Save Artifacts
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: dists
           path: dist
@@ -64,7 +64,7 @@ jobs:
       - name: Install wheel
         run: pip install correlation_py --no-index --find-links dist --no-deps --force-reinstall
       - name: Save Artifacts
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: dists
           path: dist
@@ -79,7 +79,7 @@ jobs:
           command: sdist
           args: --out dist --manifest-path correlation-py/Cargo.toml
       - name: Upload sdist
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: dists
           path: dist/*.tar.gz
