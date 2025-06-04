@@ -36,7 +36,7 @@ jobs:
       - name: Save Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: dists
+          name: dist-windows-${{ matrix.pyversion }}
           path: dist
 
   linux:
@@ -66,7 +66,7 @@ jobs:
       - name: Save Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: dists
+          name: dist-linux-${{ matrix.pyversion }}
           path: dist
   
   sdist:
@@ -81,7 +81,7 @@ jobs:
       - name: Upload sdist
         uses: actions/upload-artifact@v4
         with:
-          name: dists
+          name: dist-source
           path: dist/*.tar.gz
 
   upload_pypi:
@@ -94,7 +94,8 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4.1.7
         with:
-          name: dists
+          pattern: dist-*
+          merge-multiple: true
           path: dist/
 
       - uses: pypa/gh-action-pypi-publish@release/v1
